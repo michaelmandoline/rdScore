@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=rdScore
+Comment=Lightweight PDF reader designed for musicians
+Exec=rdScore %f
+Icon=rdscore
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/pdf;
