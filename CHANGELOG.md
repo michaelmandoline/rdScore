@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.4 - 2026
+
+### Fixed
+
+- Fullscreen centering correction
+- Page number overlay
+- Page extraction: fixed single-page extraction (start == end)
+- Desktop filename correction
+- Versioning aligned (internal = release version)
+
+---
+
 ## 1.0.0 - 2026
 
 Initial public release.

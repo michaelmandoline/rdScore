@@ -7,27 +7,19 @@
 ```
 # rdScore
 
-Lightweight PDF sheet music reader for Linux with Bluetooth pedal
-support.\
-Lecteur de partitions PDF pour Linux avec compatibilité pédale
-Bluetooth.
+**Current version: 1.0.4**
 
-Designed for musicians who need a reliable, distraction-free score
-viewer for rehearsal, individual practice, recording sessions, and
-concert preparation.\
-Conçu pour les musiciens recherchant un lecteur de partitions fiable,
-sans distraction, pour la répétition, le travail individuel,
-l'enregistrement et la préparation de concert.
+Lightweight and performance-oriented PDF sheet music reader for Linux with Bluetooth pedal support.
+Lecteur de partitions PDF léger et orienté performance pour Linux avec compatibilité pédale Bluetooth.
 
-rdScore focuses on fullscreen readability, keyboard control, two-page
-layout, and fast page navigation.\
-rdScore privilégie la lisibilité plein écran, le contrôle clavier, le
-mode 1 ou 2 pages et une navigation rapide entre les pages.
+Designed for musicians who need a reliable, distraction-free score viewer for rehearsal, individual practice, recording sessions.
+Conçu pour les musiciens recherchant un lecteur de partitions fiable, sans distraction, pour la répétition, le travail individuel, l’enregistrement.
 
-It works with standard Bluetooth page-turn pedals that emulate keyboard
-arrow or PageUp/PageDown keys.\
-Compatible avec les pédales Bluetooth standard qui simulent des touches
-clavier (flèches ou PageUp/PageDown).
+rdScore focuses on fullscreen readability, fast navigation, two-page layout, and precise keyboard control.
+rdScore privilégie la lisibilité en plein écran, la navigation rapide, le mode 1 ou 2 pages et un contrôle clavier précis.
+
+It works with standard Bluetooth page-turn pedals that emulate keyboard arrow or PageUp/PageDown keys.
+Compatible avec les pédales Bluetooth standard qui simulent des touches clavier (flèches ou PageUp/PageDown).
 
 ------------------------------------------------------------------------
 

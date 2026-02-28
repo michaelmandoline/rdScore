@@ -1,4 +1,4 @@
-// rdScore.cpp (v1.5.2 - Concert + 2 pages + Zoom + Scrollbars + Help page + Zoom overlay + Smart advance + Extract)
+// rdScore.cpp (v1.0.4 - Concert + 2 pages + Zoom + Scrollbars + Help page + Zoom overlay + Smart advance + Extract)
 // Build:
 //   g++ -O2 -std=c++17 rdScore.cpp -o rdScore $(pkg-config --cflags --libs gtk+-3.0 poppler-glib)
 
@@ -9,7 +9,7 @@
 #include <string>
 #include <cmath>
 
-static const char* RDSCORE_VERSION = "1.5.2";
+static const char* RDSCORE_VERSION = "1.0.4";
 
 struct AppState {
   PopplerDocument* doc = nullptr;
@@ -17,7 +17,9 @@ struct AppState {
   int current_left = 0;
 
   bool two_pages = true;
-  bool fullscreen = true; // concert default
+  bool fullscreen = true; 
+  bool pending_recenter = false; // request centering after a size change (e.g., leaving fullscreen)
+// concert default
   double zoom = 1.0;      // 1.0 = 100%
   int zoom_percent = 100; // cached for help/overlay
 
@@ -25,6 +27,11 @@ struct AppState {
   bool zoom_overlay = false;
   int zoom_overlay_percent = 100;
   guint zoom_overlay_timer = 0;
+
+  // Page overlay (after page change)
+  bool page_overlay = false;
+  std::string page_overlay_text;
+  guint page_overlay_timer = 0;
 
   // For extraction (E)
   std::string input_pdf_abs; // absolute path to source PDF
@@ -76,6 +83,9 @@ static void toggle_fullscreen(AppState* s) {
   } else {
     gtk_window_unfullscreen(GTK_WINDOW(s->window));
     show_cursor(s->window);
+    // When leaving fullscreen, GTK may keep the previous scroll offset until the next
+    // size allocation / redraw. Request a recenter so the content is immediately placed.
+    s->pending_recenter = true;
   }
 }
 
@@ -115,6 +125,41 @@ static void trigger_zoom_overlay(AppState* s) {
   queue_redraw(s);
 }
 
+
+static gboolean page_overlay_timeout_cb(gpointer user_data) {
+  AppState* s = (AppState*)user_data;
+  if (!s) return G_SOURCE_REMOVE;
+  s->page_overlay = false;
+  s->page_overlay_timer = 0;
+  queue_redraw(s);
+  return G_SOURCE_REMOVE;
+}
+
+static void trigger_page_overlay(AppState* s) {
+  if (!s) return;
+
+  int left = clampi(s->current_left, 0, std::max(0, s->n_pages - 1));
+  int right = (s->two_pages && left + 1 < s->n_pages) ? (left + 1) : -1;
+
+  // Human-friendly 1-based page numbers for display
+  if (right >= 0) {
+    s->page_overlay_text = "Pages " + std::to_string(left + 1) + "-" + std::to_string(right + 1) +
+                           " / " + std::to_string(s->n_pages);
+  } else {
+    s->page_overlay_text = "Page " + std::to_string(left + 1) +
+                           " / " + std::to_string(s->n_pages);
+  }
+
+  s->page_overlay = true;
+
+  if (s->page_overlay_timer) {
+    g_source_remove(s->page_overlay_timer);
+    s->page_overlay_timer = 0;
+  }
+  s->page_overlay_timer = g_timeout_add(900, page_overlay_timeout_cb, s);
+  queue_redraw(s);
+}
+
 // viewport size (visible area of scrolled window)
 static void get_viewport_size(AppState* s, int& vw, int& vh) {
   vw = 1200; vh = 800;
@@ -128,6 +173,28 @@ static void get_viewport_size(AppState* s, int& vw, int& vh) {
     if (pw >= 50) vw = (int)pw;
     if (ph >= 50) vh = (int)ph;
   }
+}
+
+static void center_view(AppState* s) {
+  if (!s || !s->scrolled) return;
+  GtkAdjustment* hadj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(s->scrolled));
+  GtkAdjustment* vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(s->scrolled));
+  if (!hadj || !vadj) return;
+
+  // Center within the scrollable area when content is larger than the viewport.
+  const double h_upper = gtk_adjustment_get_upper(hadj);
+  const double h_page  = gtk_adjustment_get_page_size(hadj);
+  const double v_upper = gtk_adjustment_get_upper(vadj);
+  const double v_page  = gtk_adjustment_get_page_size(vadj);
+
+  double target_x = 0.0;
+  double target_y = 0.0;
+
+  if (h_upper > h_page) target_x = (h_upper - h_page) * 0.5;
+  if (v_upper > v_page) target_y = (v_upper - v_page) * 0.5;
+
+  gtk_adjustment_set_value(hadj, target_x);
+  gtk_adjustment_set_value(vadj, target_y);
 }
 
 static void compute_content_size(AppState* s) {
@@ -198,6 +265,7 @@ static void goto_left_page(AppState* s, int left0) {
   s->current_left = clampi(left0, 0, std::max(0, s->n_pages - 1));
   normalize_left(s);
   compute_content_size(s);
+  trigger_page_overlay(s);
   queue_redraw(s);
 }
 
@@ -220,6 +288,7 @@ static void zoom_in(AppState* s)  {
   update_zoom_percent(s);
   trigger_zoom_overlay(s);
   compute_content_size(s);
+  trigger_page_overlay(s);
   queue_redraw(s);
 }
 static void zoom_out(AppState* s) {
@@ -227,6 +296,7 @@ static void zoom_out(AppState* s) {
   update_zoom_percent(s);
   trigger_zoom_overlay(s);
   compute_content_size(s);
+  trigger_page_overlay(s);
   queue_redraw(s);
 }
 static void zoom_reset(AppState* s){
@@ -234,6 +304,7 @@ static void zoom_reset(AppState* s){
   update_zoom_percent(s);
   trigger_zoom_overlay(s);
   compute_content_size(s);
+  trigger_page_overlay(s);
   queue_redraw(s);
 }
 
@@ -428,11 +499,11 @@ static void extract_pages(AppState* s) {
   if (!ask_int(s, "Extraction PDF", "Page fin (1..N) :", p2)) return;
 
   if (p1 < 1 || p2 < 1 || p1 > s->n_pages || p2 > s->n_pages) {
-    info_box(s, "Pages hors limites.\nRappel: 1 <= début < fin <= " + std::to_string(s->n_pages));
+    info_box(s, "Pages hors limites.\nRappel: 1 <= début <= fin <= " + std::to_string(s->n_pages));
     return;
   }
-  if (p2 <= p1) {
-    info_box(s, "Intervalle invalide: il faut début < fin.");
+  if (p2 < p1) {
+    info_box(s, "Intervalle invalide: il faut début <= fin.");
     return;
   }
 
@@ -602,6 +673,7 @@ static gboolean on_key(GtkWidget*, GdkEventKey* ev, gpointer user_data) {
       s->two_pages = false;
       normalize_left(s);
       compute_content_size(s);
+      trigger_page_overlay(s);
       queue_redraw(s);
       return TRUE;
 
@@ -609,6 +681,7 @@ static gboolean on_key(GtkWidget*, GdkEventKey* ev, gpointer user_data) {
       s->two_pages = true;
       normalize_left(s);
       compute_content_size(s);
+      trigger_page_overlay(s);
       queue_redraw(s);
       return TRUE;
 
@@ -776,6 +849,39 @@ static gboolean on_draw(GtkWidget* widget, cairo_t* cr, gpointer user_data) {
     cairo_restore(cr);
   }
 
+
+  if (s->page_overlay) {
+    const std::string& t = s->page_overlay_text;
+
+    const double pad = 18.0;
+    cairo_save(cr);
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(cr, 22);
+
+    cairo_text_extents_t te;
+    cairo_text_extents(cr, t.c_str(), &te);
+
+    const double bw = te.width + pad * 2.0;
+    const double bh = te.height + pad * 1.6;
+
+    const double x = (W - bw) * 0.5;
+    const double y = std::max(12.0, H * 0.08);
+
+    cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.55);
+    cairo_rectangle(cr, x, y, bw, bh);
+    cairo_fill(cr);
+
+    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.92);
+    const double tx = x + pad - te.x_bearing;
+    const double ty = y + (bh - te.height) * 0.5 - te.y_bearing;
+
+    cairo_move_to(cr, tx, ty);
+    cairo_show_text(cr, t.c_str());
+
+    cairo_restore(cr);
+  }
+
+
   return FALSE;
 }
 
@@ -791,7 +897,13 @@ static void on_realize(GtkWidget* widget, gpointer user_data) {
 
 static void on_size_allocate(GtkWidget*, GdkRectangle*, gpointer user_data) {
   AppState* s = (AppState*)user_data;
-  if (s) compute_content_size(s);
+  if (!s) return;
+  compute_content_size(s);
+  if (s->pending_recenter) {
+    center_view(s);
+    s->pending_recenter = false;
+    queue_redraw(s);
+  }
 }
 
 int main(int argc, char** argv) {
