@@ -1,4 +1,4 @@
-// rdScore.cpp (v1.0.4 - Concert + 2 pages + Zoom + Scrollbars + Help page + Zoom overlay + Smart advance + Extract)
+// rdScore.cpp (v1.0.5 - Concert + 2 pages + Zoom + Scrollbars + Help page + Zoom overlay + Smart advance + Extract)
 // Build:
 //   g++ -O2 -std=c++17 rdScore.cpp -o rdScore $(pkg-config --cflags --libs gtk+-3.0 poppler-glib)
 
@@ -9,7 +9,7 @@
 #include <string>
 #include <cmath>
 
-static const char* RDSCORE_VERSION = "1.0.4";
+static const char* RDSCORE_VERSION = "1.0.5";
 
 struct AppState {
   PopplerDocument* doc = nullptr;
@@ -73,6 +73,30 @@ static void show_cursor(GtkWidget* widget) {
   GdkWindow* gw = gtk_widget_get_window(widget);
   if (!gw) return;
   gdk_window_set_cursor(gw, nullptr);
+}
+
+static void restore_focus(AppState* s) {
+  if (!s) return;
+  if (s->drawing) gtk_widget_grab_focus(s->drawing);
+}
+
+// Ensure mouse cursor is visible while a dialog is open (fixes "blank cursor" when fullscreen hide_cursor is active)
+static void dialog_begin(AppState* s, GtkWidget* dialog) {
+  if (!s) return;
+  // If we're in fullscreen, the main window uses a blank cursor. Temporarily restore it so dialogs show a normal pointer
+  if (s->fullscreen) show_cursor(s->window);
+
+  if (dialog) {
+    // Realize so it owns a GdkWindow, then ensure default cursor
+    gtk_widget_realize(dialog);
+    show_cursor(dialog);
+  }
+}
+
+static void dialog_end(AppState* s) {
+  if (!s) return;
+  restore_focus(s);
+  if (s->fullscreen) hide_cursor(s->window);
 }
 
 static void toggle_fullscreen(AppState* s) {
@@ -395,7 +419,9 @@ static bool ask_int(AppState* s, const char* title, const char* label_txt, int& 
   gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_OK);
   gtk_widget_show_all(dialog);
 
+  dialog_begin(s, dialog);
   int resp = gtk_dialog_run(GTK_DIALOG(dialog));
+  dialog_end(s);
   bool ok = false;
   if (resp == GTK_RESPONSE_OK) {
     const char* txt = gtk_entry_get_text(GTK_ENTRY(entry));
@@ -416,7 +442,13 @@ static void info_box(AppState* s, const std::string& msg) {
 
   g_signal_connect(d, "key-press-event", G_CALLBACK(dialog_esc_to_cancel), nullptr);
 
+  dialog_begin(s, d);
+
+
   gtk_dialog_run(GTK_DIALOG(d));
+
+
+  dialog_end(s);
   gtk_widget_destroy(d);
 }
 
@@ -456,7 +488,12 @@ static bool choose_save_path(AppState* s, const std::string& default_dir, const 
   gtk_file_chooser_add_filter(ch, f);
 
   bool ok = false;
-  if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT) {
+  dialog_begin(s, dlg);
+
+  int resp = gtk_dialog_run(GTK_DIALOG(dlg));
+  dialog_end(s);
+
+  if (resp == GTK_RESPONSE_ACCEPT) {
     char* fn = gtk_file_chooser_get_filename(ch);
     if (fn) {
       out_path = fn;
@@ -569,7 +606,13 @@ static void show_help(AppState* s) {
 
   g_signal_connect(d, "key-press-event", G_CALLBACK(dialog_esc_to_cancel), nullptr);
 
+  dialog_begin(s, d);
+
+
   gtk_dialog_run(GTK_DIALOG(d));
+
+
+  dialog_end(s);
   gtk_widget_destroy(d);
 }
 
@@ -600,7 +643,9 @@ static void goto_dialog(AppState* s) {
   gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_OK);
   gtk_widget_show_all(dialog);
 
+  dialog_begin(s, dialog);
   int resp = gtk_dialog_run(GTK_DIALOG(dialog));
+  dialog_end(s);
   if (resp == GTK_RESPONSE_OK) {
     const char* txt = gtk_entry_get_text(GTK_ENTRY(entry));
     int page = txt ? atoi(txt) : 0;
@@ -825,8 +870,18 @@ static gboolean on_draw(GtkWidget* widget, cairo_t* cr, gpointer user_data) {
     std::string z = std::to_string(s->zoom_overlay_percent) + " %";
 
     const double bw = 200.0, bh = 96.0;
-    const double x = (W - bw) * 0.5;
-    const double y = (H - bh) * 0.5;
+    // Center zoom overlay in the visible viewport (not the full content)
+    int vw = 0, vh = 0;
+    get_viewport_size(s, vw, vh);
+    double sx = 0.0, sy = 0.0;
+    if (s->scrolled) {
+      GtkAdjustment* hadj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(s->scrolled));
+      GtkAdjustment* vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(s->scrolled));
+      if (hadj) sx = gtk_adjustment_get_value(hadj);
+      if (vadj) sy = gtk_adjustment_get_value(vadj);
+    }
+    const double x = sx + (vw - bw) * 0.5;
+    const double y = sy + (vh - bh) * 0.5;
 
     cairo_save(cr);
 
@@ -864,8 +919,19 @@ static gboolean on_draw(GtkWidget* widget, cairo_t* cr, gpointer user_data) {
     const double bw = te.width + pad * 2.0;
     const double bh = te.height + pad * 1.6;
 
-    const double x = (W - bw) * 0.5;
-    const double y = std::max(12.0, H * 0.08);
+    // Place overlay inside the *visible viewport* (important when scrolled, e.g. non-fullscreen)
+    int vw = 0, vh = 0;
+    get_viewport_size(s, vw, vh);
+    double sx = 0.0, sy = 0.0;
+    if (s->scrolled) {
+      GtkAdjustment* hadj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(s->scrolled));
+      GtkAdjustment* vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(s->scrolled));
+      if (hadj) sx = gtk_adjustment_get_value(hadj);
+      if (vadj) sy = gtk_adjustment_get_value(vadj);
+    }
+
+    const double x = sx + (vw - bw) * 0.5;
+    const double y = sy + std::max(12.0, vh * 0.08);
 
     cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.55);
     cairo_rectangle(cr, x, y, bw, bh);

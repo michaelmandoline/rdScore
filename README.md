@@ -120,9 +120,19 @@ rdScore --version
 
 rdScore requires GTK+3, Poppler (glib binding), and qpdf.
 
-``` bash
+On Debian / Ubuntu:
 sudo apt install libgtk-3-dev libpoppler-glib-dev qpdf
-```
+
+On Fedora:
+sudo dnf install gtk3-devel poppler-glib-devel qpdf
+
+On Arch Linux:
+sudo pacman -S gtk3 poppler qpdf
+
+On openSUSE:
+sudo zypper install gtk3-devel poppler-glib-devel qpdf
+
+Page extraction requires qpdf. If qpdf is not installed, extraction will not work.```
 
 ### Compilation
 
@@ -162,9 +172,19 @@ xdg-mime default rdscore.desktop application/pdf
 
 rdScore nécessite GTK+3, Poppler (binding glib) et qpdf.
 
-``` bash
+Sur Debian / Ubuntu :
 sudo apt install libgtk-3-dev libpoppler-glib-dev qpdf
-```
+
+Sur Fedora :
+sudo dnf install gtk3-devel poppler-glib-devel qpdf
+
+Sur Arch Linux :
+sudo pacman -S gtk3 poppler qpdf
+
+Sur openSUSE :
+sudo zypper install gtk3-devel poppler-glib-devel qpdf
+
+L’extraction de pages nécessite qpdf. Sans qpdf, cette fonctionnalité ne sera pas disponible.
 
 ### Compilation
 
