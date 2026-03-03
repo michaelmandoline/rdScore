@@ -1,10 +1,11 @@
 [Desktop Entry]
 Type=Application
 Name=rdScore
+Name[fr_FR]=rdScore
 Comment=Lightweight PDF reader designed for musicians
+Comment[fr_FR]=Lecteur de partitions PDF léger conçu pour les musiciens
 Exec=rdScore %f
 Icon=rdscore
 Terminal=false
 Categories=Office;Viewer;
 MimeType=application/pdf;
-Name[fr_FR]=rdScore.desktop
