@@ -1,4 +1,4 @@
-// rdScore.cpp (v1.0.5 - Concert + 2 pages + Zoom + Scrollbars + Help page + Zoom overlay + Smart advance + Extract)
+// rdScore.cpp (v1.0.6 - Concert + 2 pages + Zoom + Scrollbars + Help page + Zoom overlay + Smart advance + Extract)
 // Build:
 //   g++ -O2 -std=c++17 rdScore.cpp -o rdScore $(pkg-config --cflags --libs gtk+-3.0 poppler-glib)
 
@@ -9,7 +9,7 @@
 #include <string>
 #include <cmath>
 
-static const char* RDSCORE_VERSION = "1.0.5";
+static const char* RDSCORE_VERSION = "1.0.6";
 
 struct AppState {
   PopplerDocument* doc = nullptr;
@@ -715,6 +715,7 @@ static gboolean on_key(GtkWidget*, GdkEventKey* ev, gpointer user_data) {
       return TRUE;
 
     case GDK_KEY_1:
+    case GDK_KEY_KP_1:
       s->two_pages = false;
       normalize_left(s);
       compute_content_size(s);
@@ -723,6 +724,7 @@ static gboolean on_key(GtkWidget*, GdkEventKey* ev, gpointer user_data) {
       return TRUE;
 
     case GDK_KEY_2:
+    case GDK_KEY_KP_2:
       s->two_pages = true;
       normalize_left(s);
       compute_content_size(s);

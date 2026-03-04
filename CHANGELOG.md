@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.6 - 2026-03
+
+### Fixed
+
+- Numeric keypad keys (KP_1, KP_2) now correctly handled
+  for page layout shortcuts (1-page / 2-page).
+
+---
+
 ## 1.0.5 - 2026
 
 - Removed small usability frictions without architectural changes.
