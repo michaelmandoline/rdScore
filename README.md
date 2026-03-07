@@ -1,231 +1,139 @@
-```{=html}
-<p align="center">
-```
-`<img src="assets/rdscore-logo-color-1200.png" width="400">`{=html}
-```{=html}
-</p>
-```
 # rdScore
 
-**Current version: 1.0.4**
+---
 
-Lightweight and performance-oriented PDF sheet music reader for Linux with Bluetooth pedal support.
-Lecteur de partitions PDF léger et orienté performance pour Linux avec compatibilité pédale Bluetooth.
+# Français
 
-Designed for musicians who need a reliable, distraction-free score viewer for rehearsal, individual practice, recording sessions.
-Conçu pour les musiciens recherchant un lecteur de partitions fiable, sans distraction, pour la répétition, le travail individuel, l’enregistrement.
+## Présentation
 
-rdScore focuses on fullscreen readability, fast navigation, two-page layout, and precise keyboard control.
-rdScore privilégie la lisibilité en plein écran, la navigation rapide, le mode 1 ou 2 pages et un contrôle clavier précis.
+rdScore est un lecteur PDF léger conçu principalement pour les musiciens
+travaillant avec des partitions, tout en restant un lecteur PDF simple
+pour un usage général.
 
-It works with standard Bluetooth page-turn pedals that emulate keyboard arrow or PageUp/PageDown keys.
-Compatible avec les pédales Bluetooth standard qui simulent des touches clavier (flèches ou PageUp/PageDown).
+Le projet vise à fournir un outil rapide, prévisible et sans distraction
+pour la lecture de partitions et de documents PDF sous Linux.
 
-------------------------------------------------------------------------
+rdScore privilégie la simplicité plutôt que l’accumulation de nouvelles fonctionnalités.
 
-## 🇬🇧 Overview
+## Philosophie
 
-rdScore is a minimalist PDF reader designed primarily for musicians.
+rdScore suit des principes de conception simples :
 
-It provides:
+- application mono-fenêtre
+- une tâche à la fois
+- navigation prévisible
+- Esc revient toujours au niveau précédent
+- pas d’état caché
+- pas de mémorisation automatique de la dernière page
 
--   Fullscreen concert mode\
--   Reliable keyboard navigation\
--   1-page / 2-page layout\
--   Zoom and scroll control\
--   Page extraction for individual parts\
--   Bluetooth pedal compatibility
+L’objectif est de garder un programme simple, fiable et agréable à utiliser.
 
-No cloud.\
-No subscription.\
-No background services.\
-Just a focused PDF score reader.
+## Fonctionnalités principales
 
-------------------------------------------------------------------------
+- affichage rapide des fichiers PDF
+- navigation au clavier
+- mode double page
+- extraction de pages
+- impression simple (sans aperçu)
+- gestion de setlists (listes de partitions)
 
-## 🇫🇷 Présentation
+## Utilisation
 
-rdScore est un lecteur PDF minimaliste conçu principalement pour les
-musiciens.
+Ouvrir un fichier PDF :
 
-Il propose :
+rdscore fichier.pdf
 
--   Mode plein écran concert\
--   Navigation clavier fiable\
--   Mode 1 page / 2 pages\
--   Zoom et défilement\
--   Extraction de pages pour parties individuelles\
--   Compatibilité pédale Bluetooth
+Lancer rdScore sans argument :
 
-Pas de cloud.\
-Pas d'abonnement.\
-Pas de services en arrière-plan.\
-Un lecteur de partitions PDF centré sur l'essentiel.
+rdscore
 
-------------------------------------------------------------------------
+Le programme ouvre alors le menu principal, permettant de :
 
-# Features / Fonctionnalités
+- ouvrir un fichier
+- ouvrir une setlist
+- quitter l’application
 
-## Display / Affichage
+## Setlists
 
--   Fullscreen mode (`f`)\
--   1-page / 2-page layout (`1` / `2`)\
--   Intelligent centering\
--   Automatic fit-to-screen\
--   Zoom (`Ctrl +`, `Ctrl -`, `Ctrl 0`)\
--   Scroll when zoomed
+Une setlist est une liste ordonnée de fichiers PDF.
 
-## Navigation
+Elle permet de regrouper plusieurs partitions et d’y accéder rapidement.
+La navigation n’est pas imposée : chaque entrée peut être ouverte directement.
 
-  Key                 Action
-  ------------------- ------------------------------------
-  ← / →               Previous / Next page (zoom = 100%)
-  ↑ / ↓               Scroll when zoomed
-  PageUp / PageDown   Previous / Next page
-  Space / Backspace   Previous / Next page
-  g                   Go to page
-  e                   Extract page range
-  F1 / ?              Help
-  Esc                 Quit
+## Documentation
 
-------------------------------------------------------------------------
+La documentation technique du projet se trouve dans le dossier :
 
-# Bluetooth Pedal Support
+doc/
 
-Most Bluetooth pedals emulate keyboard keys.
+---
 
-rdScore works out of the box with standard pedals configured as:
+# English
 
--   Left arrow or PageUp → Previous page\
--   Right arrow or PageDown → Next page
+## Overview
 
-No specific driver or configuration required.
+rdScore is a lightweight PDF reader designed primarily for musicians
+working with sheet music, while remaining a simple general-purpose
+PDF reader.
 
-------------------------------------------------------------------------
+The goal of the project is to provide a fast, predictable and
+distraction-free tool for reading scores and PDF documents on Linux.
 
-# Command Line Usage / Utilisation en ligne de commande
+rdScore focuses on simplicity rather than adding more features.
 
-``` bash
-rdScore file.pdf
-rdScore --version
-```
+## Philosophy
 
-------------------------------------------------------------------------
+rdScore follows a strict design philosophy:
 
-## Build & Installation / Compilation et installation
+- single-window application
+- one task at a time
+- predictable navigation
+- Esc always goes back one level
+- no hidden state
+- no automatic page memory
 
-### English
+The objective is to keep the program simple, reliable and easy to use.
 
-### Dependencies
+## Main Features
 
-rdScore requires GTK+3, Poppler (glib binding), and qpdf.
+- fast PDF rendering
+- keyboard-based navigation
+- two-page reading mode
+- page extraction
+- simple printing (no preview)
+- support for setlists (collections of scores)
 
-On Debian / Ubuntu:
-sudo apt install libgtk-3-dev libpoppler-glib-dev qpdf
+## Usage
 
-On Fedora:
-sudo dnf install gtk3-devel poppler-glib-devel qpdf
+Open a PDF file:
 
-On Arch Linux:
-sudo pacman -S gtk3 poppler qpdf
+rdscore file.pdf
 
-On openSUSE:
-sudo zypper install gtk3-devel poppler-glib-devel qpdf
+Launch rdScore without arguments:
 
-Page extraction requires qpdf. If qpdf is not installed, extraction will not work.```
+rdscore
 
-### Compilation
+This opens the main menu, allowing the user to:
 
-``` bash
-g++ -O2 -std=c++17 rdScore.cpp -o rdScore \
-$(pkg-config --cflags --libs gtk+-3.0 poppler-glib)
-```
+- open a file
+- open a setlist
+- quit the application
 
-### Local Installation
+## Setlists
 
-``` bash
-mkdir -p ~/.local/bin
-cp rdScore ~/.local/bin/
-chmod +x ~/.local/bin/rdScore
-```
+A setlist is an ordered list of PDF files.
 
-Ensure that \~/.local/bin is present in your PATH.
+Setlists allow grouping several scores together and accessing them quickly.
+Navigation inside a setlist is not forced to follow the order; any entry can be opened directly.
 
-### Desktop Integration
+## Documentation
 
-``` bash
-mkdir -p ~/.local/share/applications
-cp rdscore.desktop ~/.local/share/applications/
-```
+Technical documentation for the project can be found in the:
 
-Optional: set as default PDF reader:
+doc/
 
-``` bash
-xdg-mime default rdscore.desktop application/pdf
-```
+directory.
 
-------------------------------------------------------------------------
+## Project Status
 
-### Français
-
-### Dépendances
-
-rdScore nécessite GTK+3, Poppler (binding glib) et qpdf.
-
-Sur Debian / Ubuntu :
-sudo apt install libgtk-3-dev libpoppler-glib-dev qpdf
-
-Sur Fedora :
-sudo dnf install gtk3-devel poppler-glib-devel qpdf
-
-Sur Arch Linux :
-sudo pacman -S gtk3 poppler qpdf
-
-Sur openSUSE :
-sudo zypper install gtk3-devel poppler-glib-devel qpdf
-
-L’extraction de pages nécessite qpdf. Sans qpdf, cette fonctionnalité ne sera pas disponible.
-
-### Compilation
-
-``` bash
-g++ -O2 -std=c++17 rdScore.cpp -o rdScore \
-$(pkg-config --cflags --libs gtk+-3.0 poppler-glib)
-```
-
-### Installation locale
-
-``` bash
-mkdir -p ~/.local/bin
-cp rdScore ~/.local/bin/
-chmod +x ~/.local/bin/rdScore
-```
-
-Vérifiez que \~/.local/bin est présent dans votre variable
-d'environnement PATH.
-
-### Intégration au bureau
-
-``` bash
-mkdir -p ~/.local/share/applications
-cp rdscore.desktop ~/.local/share/applications/
-```
-
-Optionnel : définir comme lecteur PDF par défaut :
-
-``` bash
-xdg-mime default rdscore.desktop application/pdf
-```
-
-------------------------------------------------------------------------
-
-## License / Licence
-
-GNU General Public License v3.0
-
-------------------------------------------------------------------------
-
-## Author / Auteur
-
-Mihai Cristescu\
-2026
+Current development target: version 1.1.0

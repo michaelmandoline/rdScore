@@ -1,5 +1,38 @@
 # Changelog
 
+## Version 1.1.0 - 2026-03
+
+### Added
+
+- Main menu when launching rdScore without arguments
+- Setlists support
+- Dedicated folder for setlists
+- Sidebar visible in setlist mode
+- Ability to add/remove/reorder files inside a setlist
+- Setlist deletion with preview and confirmation
+- Simple printing support
+
+### Improved
+
+- Extraction dialog accepting:
+  - single page (example: 7)
+  - page ranges (example: 10-14)
+
+### Behaviour changes
+
+- Launching rdScore without arguments opens the main menu
+  instead of returning an error (as in version 1.0.x)
+
+### Design rules enforced
+
+- Single-window application
+- Esc key always returns to the previous level
+- No hidden state
+- No automatic page memory
+- No print preview
+
+---
+
 ## 1.0.6 - 2026-03
 
 ### Fixed

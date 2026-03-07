@@ -3,3 +3,5 @@ appimage-tools/
 rdScore
 *.AppImage
 *.tar.gz
+*.o
+*.log

@@ -1,4 +1,4 @@
-// rdScore.cpp (v1.0.6 - Concert + 2 pages + Zoom + Scrollbars + Help page + Zoom overlay + Smart advance + Extract)
+// rdScore.cpp (v1.1.0 candidate - menu, open/print, basic setlist dialog, single-field extract)
 // Build:
 //   g++ -O2 -std=c++17 rdScore.cpp -o rdScore $(pkg-config --cflags --libs gtk+-3.0 poppler-glib)
 
@@ -8,8 +8,48 @@
 #include <algorithm>
 #include <string>
 #include <cmath>
+#include <vector>
+#include <fstream>
+#include <sstream>
+#include <cctype>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <cerrno>
 
-static const char* RDSCORE_VERSION = "1.0.6";
+static std::string get_setlists_directory() {
+  const char* home = getenv("HOME");
+  if (!home) return std::string();
+  return std::string(home) + "/.local/share/rdscore/setlists";
+}
+
+static void ensure_setlists_directory() {
+  const char* home = getenv("HOME");
+  if (!home) return;
+
+  std::string base = std::string(home) + "/.local/share/rdscore";
+  std::string dir  = base + "/setlists";
+
+  mkdir(base.c_str(), 0755);
+  mkdir(dir.c_str(), 0755);
+}
+
+static std::string trim_copy(const std::string& s) {
+  size_t a = 0;
+  while (a < s.size() && std::isspace((unsigned char)s[a])) ++a;
+  size_t b = s.size();
+  while (b > a && std::isspace((unsigned char)s[b - 1])) --b;
+  return s.substr(a, b - a);
+}
+
+static std::string basename_only(const std::string& path) {
+  char* b = g_path_get_basename(path.c_str());
+  std::string out = b ? b : path;
+  if (b) g_free(b);
+  return out;
+}
+
+static const char* RDSCORE_VERSION = "1.1.0";
 
 struct AppState {
   PopplerDocument* doc = nullptr;
@@ -36,6 +76,11 @@ struct AppState {
   // For extraction (E)
   std::string input_pdf_abs; // absolute path to source PDF
 
+  // Setlist context / chooser memory
+  std::string active_setlist_path;
+  bool current_doc_from_setlist = false;
+  std::string last_pdf_dir;
+
   GtkWidget* window = nullptr;
   GtkWidget* scrolled = nullptr;
   GtkWidget* drawing = nullptr;
@@ -61,12 +106,7 @@ static void normalize_left(AppState* s) {
 }
 
 static void hide_cursor(GtkWidget* widget) {
-  GdkWindow* gw = gtk_widget_get_window(widget);
-  if (!gw) return;
-  GdkDisplay* dpy = gdk_window_get_display(gw);
-  GdkCursor* cur = gdk_cursor_new_for_display(dpy, GDK_BLANK_CURSOR);
-  gdk_window_set_cursor(gw, cur);
-  g_object_unref(cur);
+  (void)widget; // v1.1.0: keep pointer visible while menu is available
 }
 
 static void show_cursor(GtkWidget* widget) {
@@ -96,14 +136,14 @@ static void dialog_begin(AppState* s, GtkWidget* dialog) {
 static void dialog_end(AppState* s) {
   if (!s) return;
   restore_focus(s);
-  if (s->fullscreen) hide_cursor(s->window);
+  show_cursor(s->window);
 }
 
 static void toggle_fullscreen(AppState* s) {
   s->fullscreen = !s->fullscreen;
   if (s->fullscreen) {
     gtk_window_fullscreen(GTK_WINDOW(s->window));
-    hide_cursor(s->window);
+    show_cursor(s->window);
   } else {
     gtk_window_unfullscreen(GTK_WINDOW(s->window));
     show_cursor(s->window);
@@ -531,12 +571,61 @@ static bool run_qpdf_extract(AppState* s, const std::string& in_abs, int page_fr
 static void extract_pages(AppState* s) {
   if (!s || !s->window || s->n_pages <= 0) return;
 
+  GtkWidget* dialog = gtk_dialog_new_with_buttons(
+      "Extraction PDF",
+      GTK_WINDOW(s->window),
+      (GtkDialogFlags)(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT),
+      "_Cancel", GTK_RESPONSE_CANCEL,
+      "_OK", GTK_RESPONSE_OK,
+      nullptr);
+  g_signal_connect(dialog, "key-press-event", G_CALLBACK(dialog_esc_to_cancel), nullptr);
+
+  GtkWidget* content = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+  GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+  gtk_container_set_border_width(GTK_CONTAINER(box), 10);
+  gtk_container_add(GTK_CONTAINER(content), box);
+
+  GtkWidget* label = gtk_label_new("Page or range (examples: 7 or 10-14):");
+  gtk_box_pack_start(GTK_BOX(box), label, FALSE, FALSE, 0);
+
+  GtkWidget* entry = gtk_entry_new();
+  gtk_entry_set_activates_default(GTK_ENTRY(entry), TRUE);
+  gtk_box_pack_start(GTK_BOX(box), entry, FALSE, FALSE, 0);
+
+  gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_OK);
+  gtk_widget_show_all(dialog);
+
+  dialog_begin(s, dialog);
+  int resp = gtk_dialog_run(GTK_DIALOG(dialog));
+  dialog_end(s);
+
   int p1 = 0, p2 = 0;
-  if (!ask_int(s, "Extraction PDF", "Page début (1..N) :", p1)) return;
-  if (!ask_int(s, "Extraction PDF", "Page fin (1..N) :", p2)) return;
+  bool ok = false;
+  if (resp == GTK_RESPONSE_OK) {
+    const char* txt = gtk_entry_get_text(GTK_ENTRY(entry));
+    std::string spec = txt ? txt : "";
+    spec.erase(std::remove_if(spec.begin(), spec.end(), [](unsigned char c){ return std::isspace(c); }), spec.end());
+    if (!spec.empty()) {
+      size_t dash = spec.find('-');
+      try {
+        if (dash == std::string::npos) {
+          p1 = p2 = std::stoi(spec);
+          ok = true;
+        } else {
+          p1 = std::stoi(spec.substr(0, dash));
+          p2 = std::stoi(spec.substr(dash + 1));
+          ok = true;
+        }
+      } catch (...) {
+        ok = false;
+      }
+    }
+  }
+  gtk_widget_destroy(dialog);
+  if (!ok) return;
 
   if (p1 < 1 || p2 < 1 || p1 > s->n_pages || p2 > s->n_pages) {
-    info_box(s, "Pages hors limites.\nRappel: 1 <= début <= fin <= " + std::to_string(s->n_pages));
+    info_box(s, std::string("Pages hors limites.\nRappel: 1 <= début <= fin <= ") + std::to_string(s->n_pages));
     return;
   }
   if (p2 < p1) {
@@ -553,7 +642,6 @@ static void extract_pages(AppState* s) {
   std::string out_path;
   if (!choose_save_path(s, default_dir, default_name, out_path)) return;
 
-  // Force .pdf extension if missing
   if (out_path.size() < 4 || out_path.substr(out_path.size() - 4) != ".pdf") {
     out_path += ".pdf";
   }
@@ -594,7 +682,8 @@ static void show_help(AppState* s) {
       "  f     : plein écran\n"
       "  g     : aller à la page\n"
       "  e     : extraire pages -> nouveau PDF\n"
-      "  Esc   : quitter";
+      "  Ctrl+P: imprimer\n"
+      "  Esc   : fermer le PDF / quitter";
 
   GtkWidget* d = gtk_message_dialog_new(
       GTK_WINDOW(s->window),
@@ -615,6 +704,14 @@ static void show_help(AppState* s) {
   dialog_end(s);
   gtk_widget_destroy(d);
 }
+
+static bool choose_open_pdf(AppState* s);
+static void print_document(AppState* s);
+static bool open_setlist_dialog(AppState* s);
+static void close_current_document(AppState* s);
+static void create_setlist_dialog(AppState* s);
+static void edit_setlist_dialog(AppState* s);
+static void delete_setlist_dialog(AppState* s);
 
 static void goto_dialog(AppState* s) {
   GtkWidget* dialog = gtk_dialog_new_with_buttons(
@@ -660,9 +757,15 @@ static gboolean on_key(GtkWidget*, GdkEventKey* ev, gpointer user_data) {
 
   const bool ctrl = (ev->state & GDK_CONTROL_MASK) != 0;
 
-  // Zoom
+  // Shortcuts with Ctrl
   if (ctrl) {
     switch (ev->keyval) {
+      case GDK_KEY_o:
+      case GDK_KEY_O:
+        choose_open_pdf(s); return TRUE;
+      case GDK_KEY_p:
+      case GDK_KEY_P:
+        print_document(s); return TRUE;
       case GDK_KEY_plus:
       case GDK_KEY_KP_Add:
       case GDK_KEY_equal: // some layouts
@@ -691,7 +794,11 @@ static gboolean on_key(GtkWidget*, GdkEventKey* ev, gpointer user_data) {
 
   switch (ev->keyval) {
     case GDK_KEY_Escape:
-      gtk_main_quit();
+      if (s->doc) {
+        close_current_document(s);
+      } else {
+        gtk_main_quit();
+      }
       return TRUE;
 
     case GDK_KEY_f:
@@ -760,12 +867,19 @@ static void render_page(PopplerPage* page, cairo_t* cr, double x, double y, doub
 
 static gboolean on_draw(GtkWidget* widget, cairo_t* cr, gpointer user_data) {
   AppState* s = (AppState*)user_data;
-  if (!s || !s->doc || s->n_pages <= 0) return FALSE;
+  if (!s) return FALSE;
 
   GtkAllocation a;
   gtk_widget_get_allocation(widget, &a);
   const int W = std::max(1, a.width);
   const int H = std::max(1, a.height);
+
+  cairo_save(cr);
+  cairo_set_source_rgb(cr, 0.08, 0.08, 0.08);
+  cairo_paint(cr);
+  cairo_restore(cr);
+
+  if (!s->doc || s->n_pages <= 0) return FALSE;
 
   int VW, VH;
   get_viewport_size(s, VW, VH);
@@ -785,12 +899,6 @@ static gboolean on_draw(GtkWidget* widget, cairo_t* cr, gpointer user_data) {
 
   double rw=0, rh=0;
   if (right) poppler_page_get_size(right, &rw, &rh);
-
-  // background (concert)
-  cairo_save(cr);
-  cairo_set_source_rgb(cr, 0.08, 0.08, 0.08);
-  cairo_paint(cr);
-  cairo_restore(cr);
 
   double scaleFit = 1.0;
   if (!s->two_pages || !right) {
@@ -958,7 +1066,7 @@ static void on_realize(GtkWidget* widget, gpointer user_data) {
   AppState* s = (AppState*)user_data;
   if (s && s->fullscreen) {
     gtk_window_fullscreen(GTK_WINDOW(widget));
-    hide_cursor(widget);
+    show_cursor(widget);
   }
   if (s) compute_content_size(s);
 }
@@ -974,59 +1082,793 @@ static void on_size_allocate(GtkWidget*, GdkRectangle*, gpointer user_data) {
   }
 }
 
+
+
+static void unload_document(AppState* s) {
+  if (!s) return;
+  if (s->doc) {
+    g_object_unref(s->doc);
+    s->doc = nullptr;
+  }
+  s->n_pages = 0;
+  s->current_left = 0;
+  s->input_pdf_abs.clear();
+  s->contentW = 1200;
+  s->contentH = 800;
+  if (s->drawing) gtk_widget_set_size_request(s->drawing, s->contentW, s->contentH);
+  queue_redraw(s);
+}
+
+static bool reopen_active_setlist(AppState* s);
+
+static void close_current_document(AppState* s) {
+  if (!s) return;
+  const bool from_setlist = s->current_doc_from_setlist && !s->active_setlist_path.empty();
+  unload_document(s);
+  show_cursor(s->window);
+  restore_focus(s);
+  if (from_setlist) {
+    s->current_doc_from_setlist = false;
+    reopen_active_setlist(s);
+  } else {
+    s->current_doc_from_setlist = false;
+  }
+}
+
+static bool load_document_from_path(AppState* s, const std::string& path, bool show_errors = true, bool from_setlist = false) {
+  if (!s) return false;
+  char* abs_path = g_canonicalize_filename(path.c_str(), nullptr);
+  if (!abs_path) {
+    if (show_errors) info_box(s, "Invalid path.");
+    return false;
+  }
+
+  char* uri = g_filename_to_uri(abs_path, nullptr, nullptr);
+  if (!uri) {
+    if (show_errors) info_box(s, "Bad path.");
+    g_free(abs_path);
+    return false;
+  }
+
+  GError* err = nullptr;
+  PopplerDocument* new_doc = poppler_document_new_from_file(uri, nullptr, &err);
+  g_free(uri);
+
+  if (!new_doc) {
+    if (show_errors) {
+      std::string msg = "Impossible d'ouvrir le PDF: ";
+      msg += (err ? err->message : "unknown error");
+      info_box(s, msg);
+    }
+    if (err) g_error_free(err);
+    g_free(abs_path);
+    return false;
+  }
+
+  const int n_pages = poppler_document_get_n_pages(new_doc);
+  if (n_pages <= 0) {
+    if (show_errors) info_box(s, "PDF sans pages.");
+    g_object_unref(new_doc);
+    g_free(abs_path);
+    return false;
+  }
+
+  unload_document(s);
+  s->doc = new_doc;
+  s->n_pages = n_pages;
+  s->input_pdf_abs = abs_path;
+  g_free(abs_path);
+  s->current_left = 0;
+  s->current_doc_from_setlist = from_setlist;
+  normalize_left(s);
+  compute_content_size(s);
+  trigger_page_overlay(s);
+  queue_redraw(s);
+  return true;
+}
+
+static bool choose_open_pdf(AppState* s) {
+  GtkWidget* dlg = gtk_file_chooser_dialog_new(
+      "Open PDF",
+      GTK_WINDOW(s->window),
+      GTK_FILE_CHOOSER_ACTION_OPEN,
+      "_Cancel", GTK_RESPONSE_CANCEL,
+      "_Open", GTK_RESPONSE_ACCEPT,
+      nullptr);
+  g_signal_connect(dlg, "key-press-event", G_CALLBACK(dialog_esc_to_cancel), nullptr);
+  GtkFileFilter* f = gtk_file_filter_new();
+  gtk_file_filter_set_name(f, "PDF (*.pdf)");
+  gtk_file_filter_add_pattern(f, "*.pdf");
+  gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dlg), f);
+  dialog_begin(s, dlg);
+  int resp = gtk_dialog_run(GTK_DIALOG(dlg));
+  dialog_end(s);
+  bool ok = false;
+  if (resp == GTK_RESPONSE_ACCEPT) {
+    char* fn = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
+    if (fn) {
+      char* dir = g_path_get_dirname(fn);
+      if (dir) {
+        s->last_pdf_dir = dir;
+        g_free(dir);
+      }
+      s->active_setlist_path.clear();
+      s->current_doc_from_setlist = false;
+      ok = load_document_from_path(s, fn, true, false);
+      g_free(fn);
+    }
+  }
+  gtk_widget_destroy(dlg);
+  return ok;
+}
+
+static std::vector<std::string> parse_setlist_file(const std::string& path) {
+  std::vector<std::string> items;
+  std::ifstream in(path);
+  if (!in) return items;
+  std::string line;
+  while (std::getline(in, line)) {
+    line = trim_copy(line);
+    if (line.empty()) continue;
+    if (line[0] == '#') continue;
+    if (line[0] != '/') continue; // absolute paths only
+    items.push_back(line);
+  }
+  return items;
+}
+
+
+static bool choose_setlist_file(AppState* s, const char* title, std::string& out_path) {
+  GtkWidget* choose = gtk_file_chooser_dialog_new(
+      title,
+      GTK_WINDOW(s->window),
+      GTK_FILE_CHOOSER_ACTION_OPEN,
+      "_Cancel", GTK_RESPONSE_CANCEL,
+      "_Open", GTK_RESPONSE_ACCEPT,
+      nullptr);
+
+  std::string dir = get_setlists_directory();
+  if (!dir.empty()) gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(choose), dir.c_str());
+
+  g_signal_connect(choose, "key-press-event", G_CALLBACK(dialog_esc_to_cancel), nullptr);
+  GtkFileFilter* f = gtk_file_filter_new();
+  gtk_file_filter_set_name(f, "Setlists (*.txt, *.lst, *.setlist)");
+  gtk_file_filter_add_pattern(f, "*.txt");
+  gtk_file_filter_add_pattern(f, "*.lst");
+  gtk_file_filter_add_pattern(f, "*.setlist");
+  gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(choose), f);
+
+  bool ok = false;
+  dialog_begin(s, choose);
+  int resp = gtk_dialog_run(GTK_DIALOG(choose));
+  dialog_end(s);
+
+  if (resp == GTK_RESPONSE_ACCEPT) {
+    char* fn = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(choose));
+    if (fn) {
+      out_path = fn;
+      g_free(fn);
+      ok = true;
+    }
+  }
+  gtk_widget_destroy(choose);
+  return ok;
+}
+
+static bool choose_new_setlist_path(AppState* s, std::string& out_path) {
+  GtkWidget* dlg = gtk_file_chooser_dialog_new(
+      "Create setlist",
+      GTK_WINDOW(s->window),
+      GTK_FILE_CHOOSER_ACTION_SAVE,
+      "_Cancel", GTK_RESPONSE_CANCEL,
+      "_Create", GTK_RESPONSE_ACCEPT,
+      nullptr);
+
+  std::string dir = get_setlists_directory();
+  if (!dir.empty()) gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(dlg), dir.c_str());
+  gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(dlg), TRUE);
+  gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dlg), "new_setlist.lst");
+
+  g_signal_connect(dlg, "key-press-event", G_CALLBACK(dialog_esc_to_cancel), nullptr);
+  GtkFileFilter* f = gtk_file_filter_new();
+  gtk_file_filter_set_name(f, "Setlists (*.lst)");
+  gtk_file_filter_add_pattern(f, "*.lst");
+  gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dlg), f);
+
+  bool ok = false;
+  dialog_begin(s, dlg);
+  int resp = gtk_dialog_run(GTK_DIALOG(dlg));
+  dialog_end(s);
+
+  if (resp == GTK_RESPONSE_ACCEPT) {
+    char* fn = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
+    if (fn) {
+      out_path = fn;
+      g_free(fn);
+      if (out_path.size() < 4 || out_path.substr(out_path.size() - 4) != ".lst")
+        out_path += ".lst";
+      ok = true;
+    }
+  }
+  gtk_widget_destroy(dlg);
+  return ok;
+}
+
+static bool choose_pdf_path(AppState* s, std::string& out_path) {
+  GtkWidget* dlg = gtk_file_chooser_dialog_new(
+      "Choose PDF",
+      GTK_WINDOW(s->window),
+      GTK_FILE_CHOOSER_ACTION_OPEN,
+      "_Cancel", GTK_RESPONSE_CANCEL,
+      "_Open", GTK_RESPONSE_ACCEPT,
+      nullptr);
+  g_signal_connect(dlg, "key-press-event", G_CALLBACK(dialog_esc_to_cancel), nullptr);
+
+  GtkFileFilter* f = gtk_file_filter_new();
+  gtk_file_filter_set_name(f, "PDF (*.pdf)");
+  gtk_file_filter_add_pattern(f, "*.pdf");
+  gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dlg), f);
+
+  if (!s->last_pdf_dir.empty()) {
+    gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(dlg), s->last_pdf_dir.c_str());
+  } else if (!s->input_pdf_abs.empty()) {
+    char* dir = g_path_get_dirname(s->input_pdf_abs.c_str());
+    if (dir) {
+      gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(dlg), dir);
+      g_free(dir);
+    }
+  }
+
+  bool ok = false;
+  dialog_begin(s, dlg);
+  int resp = gtk_dialog_run(GTK_DIALOG(dlg));
+  dialog_end(s);
+
+  if (resp == GTK_RESPONSE_ACCEPT) {
+    char* fn = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
+    if (fn) {
+      out_path = fn;
+      char* dir = g_path_get_dirname(fn);
+      if (dir) {
+        s->last_pdf_dir = dir;
+        g_free(dir);
+      }
+      g_free(fn);
+      ok = !out_path.empty() && out_path[0] == '/';
+    }
+  }
+  gtk_widget_destroy(dlg);
+  return ok;
+}
+
+static std::vector<std::string> collect_store_strings(GtkListStore* store) {
+  std::vector<std::string> out;
+  GtkTreeModel* model = GTK_TREE_MODEL(store);
+  GtkTreeIter it;
+  gboolean valid = gtk_tree_model_get_iter_first(model, &it);
+  while (valid) {
+    gchar* val = nullptr;
+    gtk_tree_model_get(model, &it, 0, &val, -1);
+    if (val) {
+      out.push_back(val);
+      g_free(val);
+    }
+    valid = gtk_tree_model_iter_next(model, &it);
+  }
+  return out;
+}
+
+static void save_setlist_file(const std::string& path, const std::vector<std::string>& items) {
+  std::ofstream out(path);
+  for (const auto& s : items) out << s << "\n";
+}
+
+static int get_selected_row_index(GtkTreeView* view) {
+  GtkTreeSelection* sel = gtk_tree_view_get_selection(view);
+  GtkTreeModel* model = nullptr;
+  GtkTreeIter it;
+  if (!gtk_tree_selection_get_selected(sel, &model, &it)) return -1;
+  GtkTreePath* path = gtk_tree_model_get_path(model, &it);
+  if (!path) return -1;
+  int* indices = gtk_tree_path_get_indices(path);
+  int idx = (indices ? indices[0] : -1);
+  gtk_tree_path_free(path);
+  return idx;
+}
+
+static void set_cursor_to_row(GtkTreeView* view, int idx) {
+  if (idx < 0) return;
+  GtkTreePath* path = gtk_tree_path_new_from_indices(idx, -1);
+  gtk_tree_view_set_cursor(view, path, nullptr, FALSE);
+  gtk_tree_view_scroll_to_cell(view, path, nullptr, TRUE, 0.5f, 0.0f);
+  gtk_tree_path_free(path);
+}
+
+static bool edit_setlist_file(AppState* s, const std::string& setlist_path, std::vector<std::string> items, bool creating) {
+  enum {
+    RESP_ADD = 1001,
+    RESP_DELETE = 1002,
+    RESP_UP = 1003,
+    RESP_DOWN = 1004
+  };
+
+  GtkWidget* dlg = gtk_dialog_new_with_buttons(
+      creating ? "Create setlist" : "Edit setlist",
+      GTK_WINDOW(s->window),
+      (GtkDialogFlags)(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT),
+      "Add before", RESP_ADD,
+      "Delete", RESP_DELETE,
+      "Move up", RESP_UP,
+      "Move down", RESP_DOWN,
+      "_Cancel", GTK_RESPONSE_CANCEL,
+      creating ? "_Create" : "_Save", GTK_RESPONSE_OK,
+      nullptr);
+  g_signal_connect(dlg, "key-press-event", G_CALLBACK(dialog_esc_to_cancel), nullptr);
+
+  GtkWidget* content = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
+  GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+  gtk_container_set_border_width(GTK_CONTAINER(box), 10);
+  gtk_container_add(GTK_CONTAINER(content), box);
+
+  std::string label_text = basename_only(setlist_path);
+  GtkWidget* label = gtk_label_new(label_text.c_str());
+  gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
+  gtk_box_pack_start(GTK_BOX(box), label, FALSE, FALSE, 0);
+
+  GtkListStore* store = gtk_list_store_new(1, G_TYPE_STRING);
+  for (const auto& p : items) {
+    GtkTreeIter it;
+    gtk_list_store_append(store, &it);
+    gtk_list_store_set(store, &it, 0, p.c_str(), -1);
+  }
+
+  GtkWidget* view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
+  GtkCellRenderer* r = gtk_cell_renderer_text_new();
+  GtkTreeViewColumn* c = gtk_tree_view_column_new_with_attributes("PDF", r, "text", 0, nullptr);
+  gtk_tree_view_append_column(GTK_TREE_VIEW(view), c);
+  gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(view), TRUE);
+  GtkTreeSelection* sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(view));
+  gtk_tree_selection_set_mode(sel, GTK_SELECTION_BROWSE);
+
+  GtkWidget* sw = gtk_scrolled_window_new(nullptr, nullptr);
+  gtk_widget_set_size_request(sw, 760, 320);
+  gtk_container_add(GTK_CONTAINER(sw), view);
+  gtk_box_pack_start(GTK_BOX(box), sw, TRUE, TRUE, 0);
+
+  gtk_widget_show_all(dlg);
+  if (!items.empty()) set_cursor_to_row(GTK_TREE_VIEW(view), 0);
+
+  bool saved = false;
+
+  while (true) {
+    dialog_begin(s, dlg);
+    int resp = gtk_dialog_run(GTK_DIALOG(dlg));
+    dialog_end(s);
+
+    if (resp == GTK_RESPONSE_OK) {
+      auto out_items = collect_store_strings(store);
+      save_setlist_file(setlist_path, out_items);
+      saved = true;
+      break;
+    }
+    if (resp == GTK_RESPONSE_CANCEL || resp == GTK_RESPONSE_DELETE_EVENT) {
+      break;
+    }
+
+    if (resp == RESP_ADD) {
+      std::string pdf;
+      if (!choose_pdf_path(s, pdf)) continue;
+
+      int idx = get_selected_row_index(GTK_TREE_VIEW(view));
+      int count = gtk_tree_model_iter_n_children(GTK_TREE_MODEL(store), nullptr);
+      if (idx < 0 || idx > count) idx = count;
+      GtkTreeIter it;
+      if (idx >= count) gtk_list_store_append(store, &it);
+      else gtk_list_store_insert(store, &it, idx);
+      gtk_list_store_set(store, &it, 0, pdf.c_str(), -1);
+      set_cursor_to_row(GTK_TREE_VIEW(view), idx);
+      continue;
+    }
+
+    if (resp == RESP_DELETE) {
+      GtkTreeModel* model = nullptr;
+      GtkTreeIter it;
+      if (gtk_tree_selection_get_selected(sel, &model, &it)) {
+        int idx = get_selected_row_index(GTK_TREE_VIEW(view));
+        gtk_list_store_remove(store, &it);
+        int count = gtk_tree_model_iter_n_children(GTK_TREE_MODEL(store), nullptr);
+        if (count > 0) {
+          if (idx >= count) idx = count - 1;
+          set_cursor_to_row(GTK_TREE_VIEW(view), idx);
+        }
+      }
+      continue;
+    }
+
+    if (resp == RESP_UP || resp == RESP_DOWN) {
+      auto vec = collect_store_strings(store);
+      int idx = get_selected_row_index(GTK_TREE_VIEW(view));
+      if (idx < 0 || idx >= (int)vec.size()) continue;
+      int new_idx = idx + (resp == RESP_UP ? -1 : 1);
+      if (new_idx < 0 || new_idx >= (int)vec.size()) continue;
+      std::swap(vec[idx], vec[new_idx]);
+      gtk_list_store_clear(store);
+      for (const auto& p : vec) {
+        GtkTreeIter it;
+        gtk_list_store_append(store, &it);
+        gtk_list_store_set(store, &it, 0, p.c_str(), -1);
+      }
+      set_cursor_to_row(GTK_TREE_VIEW(view), new_idx);
+      continue;
+    }
+  }
+
+  gtk_widget_destroy(dlg);
+  g_object_unref(store);
+  return saved;
+}
+
+static bool confirm_delete_setlist(AppState* s, const std::string& setlist_path) {
+  auto items = parse_setlist_file(setlist_path);
+
+  GtkWidget* dlg = gtk_dialog_new_with_buttons(
+      "Delete setlist",
+      GTK_WINDOW(s->window),
+      (GtkDialogFlags)(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT),
+      "_Cancel", GTK_RESPONSE_CANCEL,
+      "_Delete", GTK_RESPONSE_OK,
+      nullptr);
+  g_signal_connect(dlg, "key-press-event", G_CALLBACK(dialog_esc_to_cancel), nullptr);
+
+  GtkWidget* content = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
+  GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+  gtk_container_set_border_width(GTK_CONTAINER(box), 10);
+  gtk_container_add(GTK_CONTAINER(content), box);
+
+  std::string title = "Delete setlist:\n" + basename_only(setlist_path) + "\n\nContents:";
+  GtkWidget* label = gtk_label_new(title.c_str());
+  gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
+  gtk_box_pack_start(GTK_BOX(box), label, FALSE, FALSE, 0);
+
+  GtkWidget* sw = gtk_scrolled_window_new(nullptr, nullptr);
+  gtk_widget_set_size_request(sw, 760, 260);
+  gtk_box_pack_start(GTK_BOX(box), sw, TRUE, TRUE, 0);
+
+  GtkWidget* tv = gtk_text_view_new();
+  gtk_text_view_set_editable(GTK_TEXT_VIEW(tv), FALSE);
+  gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(tv), FALSE);
+  gtk_container_add(GTK_CONTAINER(sw), tv);
+
+  GtkTextBuffer* buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(tv));
+  std::string preview;
+  if (items.empty()) preview = "(empty setlist)\n";
+  else {
+    for (const auto& p : items) {
+      preview += p;
+      preview += "\n";
+    }
+  }
+  gtk_text_buffer_set_text(buf, preview.c_str(), -1);
+
+  gtk_widget_show_all(dlg);
+  dialog_begin(s, dlg);
+  int resp = gtk_dialog_run(GTK_DIALOG(dlg));
+  dialog_end(s);
+  gtk_widget_destroy(dlg);
+
+  return resp == GTK_RESPONSE_OK;
+}
+
+static void create_setlist_dialog(AppState* s) {
+  std::string path;
+  if (!choose_new_setlist_path(s, path)) return;
+  std::vector<std::string> items;
+  edit_setlist_file(s, path, items, true);
+}
+
+static void edit_setlist_dialog(AppState* s) {
+  std::string path;
+  if (!choose_setlist_file(s, "Edit setlist", path)) return;
+  auto items = parse_setlist_file(path);
+  edit_setlist_file(s, path, items, false);
+}
+
+static void delete_setlist_dialog(AppState* s) {
+  std::string path;
+  if (!choose_setlist_file(s, "Delete setlist", path)) return;
+  if (!confirm_delete_setlist(s, path)) return;
+
+  if (std::remove(path.c_str()) == 0) info_box(s, "Setlist deleted:\n" + path);
+  else info_box(s, "Delete failed:\n" + path);
+}
+
+
+static bool open_setlist_dialog_from_path(AppState* s, const std::string& setlist_path) {
+  auto items = parse_setlist_file(setlist_path);
+  if (items.empty()) {
+    info_box(s, "Setlist vide ou illisible.");
+    return false;
+  }
+
+  GtkWidget* dlg = gtk_dialog_new_with_buttons(
+      "Setlist",
+      GTK_WINDOW(s->window),
+      (GtkDialogFlags)(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT),
+      "_Cancel", GTK_RESPONSE_CANCEL,
+      "_Open", GTK_RESPONSE_OK,
+      nullptr);
+  g_signal_connect(dlg, "key-press-event", G_CALLBACK(dialog_esc_to_cancel), nullptr);
+
+  GtkWidget* content = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
+  GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+  gtk_container_set_border_width(GTK_CONTAINER(box), 10);
+  gtk_container_add(GTK_CONTAINER(content), box);
+
+  GtkWidget* label = gtk_label_new("Select a PDF from the setlist:");
+  gtk_box_pack_start(GTK_BOX(box), label, FALSE, FALSE, 0);
+
+  GtkListStore* store = gtk_list_store_new(2, G_TYPE_INT, G_TYPE_STRING);
+  for (size_t i = 0; i < items.size(); ++i) {
+    GtkTreeIter it;
+    gtk_list_store_append(store, &it);
+    gtk_list_store_set(store, &it, 0, (int)i + 1, 1, items[i].c_str(), -1);
+  }
+
+  GtkWidget* view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
+  g_object_unref(store);
+  GtkCellRenderer* r = gtk_cell_renderer_text_new();
+  GtkTreeViewColumn* c1 = gtk_tree_view_column_new_with_attributes("#", r, "text", 0, nullptr);
+  GtkTreeViewColumn* c2 = gtk_tree_view_column_new_with_attributes("File", r, "text", 1, nullptr);
+  gtk_tree_view_append_column(GTK_TREE_VIEW(view), c1);
+  gtk_tree_view_append_column(GTK_TREE_VIEW(view), c2);
+  gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(view), TRUE);
+  GtkTreeSelection* sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(view));
+  gtk_tree_selection_set_mode(sel, GTK_SELECTION_BROWSE);
+
+  GtkWidget* sw = gtk_scrolled_window_new(nullptr, nullptr);
+  gtk_widget_set_size_request(sw, 700, 300);
+  gtk_container_add(GTK_CONTAINER(sw), view);
+  gtk_box_pack_start(GTK_BOX(box), sw, TRUE, TRUE, 0);
+
+  gtk_widget_show_all(dlg);
+  GtkTreePath* p0 = gtk_tree_path_new_first();
+  gtk_tree_view_set_cursor(GTK_TREE_VIEW(view), p0, nullptr, FALSE);
+  gtk_tree_path_free(p0);
+
+  dialog_begin(s, dlg);
+  int resp = gtk_dialog_run(GTK_DIALOG(dlg));
+  dialog_end(s);
+
+  bool ok = false;
+  if (resp == GTK_RESPONSE_OK) {
+    GtkTreeModel* model = nullptr;
+    GtkTreeIter it;
+    if (gtk_tree_selection_get_selected(sel, &model, &it)) {
+      gchar* value = nullptr;
+      gtk_tree_model_get(model, &it, 1, &value, -1);
+      if (value) {
+        std::string chosen = value;
+        g_free(value);
+        if (chosen.empty() || chosen[0] != '/') {
+          info_box(s, "Setlist error:\nOnly absolute paths are allowed.");
+          ok = false;
+        } else {
+          s->active_setlist_path = setlist_path;
+          ok = load_document_from_path(s, chosen, true, true);
+        }
+      }
+    }
+  }
+  gtk_widget_destroy(dlg);
+  return ok;
+}
+
+static bool reopen_active_setlist(AppState* s) {
+  if (!s || s->active_setlist_path.empty()) return false;
+  return open_setlist_dialog_from_path(s, s->active_setlist_path);
+}
+
+static bool open_setlist_dialog(AppState* s) {
+  std::string setlist_path;
+  if (!choose_setlist_file(s, "Open setlist", setlist_path)) return false;
+  return open_setlist_dialog_from_path(s, setlist_path);
+}
+
+struct PrintCtx { AppState* s; };
+
+static void on_begin_print(GtkPrintOperation* op, GtkPrintContext*, gpointer user_data) {
+  PrintCtx* pc = (PrintCtx*)user_data;
+  gtk_print_operation_set_n_pages(op, (pc && pc->s) ? pc->s->n_pages : 0);
+}
+
+static void on_draw_print_page(GtkPrintOperation*, GtkPrintContext* ctx, gint page_nr, gpointer user_data) {
+  PrintCtx* pc = (PrintCtx*)user_data;
+  if (!pc || !pc->s || !pc->s->doc) return;
+  PopplerPage* page = poppler_document_get_page(pc->s->doc, page_nr);
+  if (!page) return;
+  double pw=0, ph=0;
+  poppler_page_get_size(page, &pw, &ph);
+  cairo_t* cr = gtk_print_context_get_cairo_context(ctx);
+  const double w = gtk_print_context_get_width(ctx);
+  const double h = gtk_print_context_get_height(ctx);
+  const double scale = std::min(w / pw, h / ph);
+  const double dx = (w - pw * scale) * 0.5;
+  const double dy = (h - ph * scale) * 0.5;
+  cairo_save(cr);
+  cairo_translate(cr, dx, dy);
+  cairo_scale(cr, scale, scale);
+  poppler_page_render_for_printing(page, cr);
+  cairo_restore(cr);
+  g_object_unref(page);
+}
+
+static void print_document(AppState* s) {
+  if (!s || !s->doc) {
+    info_box(s, "No PDF loaded.");
+    return;
+  }
+  GtkPrintOperation* op = gtk_print_operation_new();
+  gtk_print_operation_set_use_full_page(op, TRUE);
+  gtk_print_operation_set_unit(op, GTK_UNIT_POINTS);
+
+  // Make "Current page" available in the print dialog.
+  gtk_print_operation_set_current_page(op, clampi(s->current_left, 0, std::max(0, s->n_pages - 1)));
+
+  PrintCtx pc{ s };
+  g_signal_connect(op, "begin-print", G_CALLBACK(on_begin_print), &pc);
+  g_signal_connect(op, "draw-page", G_CALLBACK(on_draw_print_page), &pc);
+  GError* err = nullptr;
+  dialog_begin(s, s->window);
+  gtk_print_operation_run(op, GTK_PRINT_OPERATION_ACTION_PRINT_DIALOG, GTK_WINDOW(s->window), &err);
+  dialog_end(s);
+  if (err) {
+    info_box(s, std::string("Print failed: ") + err->message);
+    g_error_free(err);
+  }
+  g_object_unref(op);
+}
+
+static void show_about_box(AppState* s) {
+  GtkWidget* dlg = gtk_about_dialog_new();
+  gtk_about_dialog_set_program_name(GTK_ABOUT_DIALOG(dlg), "rdScore");
+  gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(dlg), RDSCORE_VERSION);
+  gtk_about_dialog_set_comments(GTK_ABOUT_DIALOG(dlg), "Lightweight PDF reader for musicians and general PDF use.");
+  gtk_window_set_transient_for(GTK_WINDOW(dlg), GTK_WINDOW(s->window));
+  gtk_window_set_modal(GTK_WINDOW(dlg), TRUE);
+  g_signal_connect(dlg, "key-press-event", G_CALLBACK(dialog_esc_to_cancel), nullptr);
+  dialog_begin(s, dlg);
+  gtk_dialog_run(GTK_DIALOG(dlg));
+  dialog_end(s);
+  gtk_widget_destroy(dlg);
+}
+
+static void show_main_menu_dialog(AppState* s) {
+  GtkWidget* dlg = gtk_dialog_new_with_buttons(
+      "rdScore",
+      GTK_WINDOW(s->window),
+      (GtkDialogFlags)(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT),
+      "Open _file", 1,
+      "Open _setlist", 2,
+      "_Quit", GTK_RESPONSE_CLOSE,
+      nullptr);
+  g_signal_connect(dlg, "key-press-event", G_CALLBACK(dialog_esc_to_cancel), nullptr);
+  GtkWidget* area = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
+  GtkWidget* label = gtk_label_new("Choose an action:");
+  gtk_container_set_border_width(GTK_CONTAINER(area), 14);
+  gtk_container_add(GTK_CONTAINER(area), label);
+  gtk_widget_show_all(dlg);
+
+  bool done = false;
+  while (!done) {
+    dialog_begin(s, dlg);
+    int resp = gtk_dialog_run(GTK_DIALOG(dlg));
+    dialog_end(s);
+    switch (resp) {
+      case 1:
+        if (choose_open_pdf(s)) done = true;
+        break;
+      case 2:
+        if (open_setlist_dialog(s)) done = true;
+        break;
+      default:
+        done = true;
+        if (s->window) gtk_widget_destroy(s->window);
+        break;
+    }
+  }
+  gtk_widget_destroy(dlg);
+}
+
+static void on_menu_open(GtkWidget*, gpointer user_data) { choose_open_pdf((AppState*)user_data); }
+static void on_menu_close(GtkWidget*, gpointer user_data) { close_current_document((AppState*)user_data); }
+static void on_menu_print(GtkWidget*, gpointer user_data) { print_document((AppState*)user_data); }
+static void on_menu_setlist(GtkWidget*, gpointer user_data) { open_setlist_dialog((AppState*)user_data); }
+static void on_menu_create_setlist(GtkWidget*, gpointer user_data) { create_setlist_dialog((AppState*)user_data); }
+static void on_menu_edit_setlist(GtkWidget*, gpointer user_data) { edit_setlist_dialog((AppState*)user_data); }
+static void on_menu_delete_setlist(GtkWidget*, gpointer user_data) { delete_setlist_dialog((AppState*)user_data); }
+static void on_menu_help(GtkWidget*, gpointer user_data) { show_help((AppState*)user_data); }
+static void on_menu_about(GtkWidget*, gpointer user_data) { show_about_box((AppState*)user_data); }
+static void on_menu_quit(GtkWidget*, gpointer) { gtk_main_quit(); }
+
+static GtkWidget* build_menu_bar(AppState* s) {
+  GtkWidget* menubar = gtk_menu_bar_new();
+
+  GtkWidget* file_item = gtk_menu_item_new_with_label("File");
+  GtkWidget* file_menu = gtk_menu_new();
+  GtkWidget* mi_open = gtk_menu_item_new_with_label("Open");
+  GtkWidget* mi_close = gtk_menu_item_new_with_label("Close");
+  GtkWidget* mi_print = gtk_menu_item_new_with_label("Print");
+  GtkWidget* mi_quit = gtk_menu_item_new_with_label("Quit");
+  gtk_menu_shell_append(GTK_MENU_SHELL(file_menu), mi_open);
+  gtk_menu_shell_append(GTK_MENU_SHELL(file_menu), mi_close);
+  gtk_menu_shell_append(GTK_MENU_SHELL(file_menu), mi_print);
+  gtk_menu_shell_append(GTK_MENU_SHELL(file_menu), mi_quit);
+  gtk_menu_item_set_submenu(GTK_MENU_ITEM(file_item), file_menu);
+
+  GtkWidget* setlists_item = gtk_menu_item_new_with_label("Setlists");
+  GtkWidget* setlists_menu = gtk_menu_new();
+  GtkWidget* mi_open_setlist = gtk_menu_item_new_with_label("Open setlist");
+  GtkWidget* mi_create_setlist = gtk_menu_item_new_with_label("Create setlist");
+  GtkWidget* mi_edit_setlist = gtk_menu_item_new_with_label("Edit setlist");
+  GtkWidget* mi_delete_setlist = gtk_menu_item_new_with_label("Delete setlist");
+  gtk_menu_shell_append(GTK_MENU_SHELL(setlists_menu), mi_open_setlist);
+  gtk_menu_shell_append(GTK_MENU_SHELL(setlists_menu), mi_create_setlist);
+  gtk_menu_shell_append(GTK_MENU_SHELL(setlists_menu), mi_edit_setlist);
+  gtk_menu_shell_append(GTK_MENU_SHELL(setlists_menu), mi_delete_setlist);
+  gtk_menu_item_set_submenu(GTK_MENU_ITEM(setlists_item), setlists_menu);
+
+  GtkWidget* help_item = gtk_menu_item_new_with_label("Help");
+  GtkWidget* help_menu = gtk_menu_new();
+  GtkWidget* mi_help = gtk_menu_item_new_with_label("Help");
+  GtkWidget* mi_about = gtk_menu_item_new_with_label("About");
+  gtk_menu_shell_append(GTK_MENU_SHELL(help_menu), mi_help);
+  gtk_menu_shell_append(GTK_MENU_SHELL(help_menu), mi_about);
+  gtk_menu_item_set_submenu(GTK_MENU_ITEM(help_item), help_menu);
+
+  gtk_menu_shell_append(GTK_MENU_SHELL(menubar), file_item);
+  gtk_menu_shell_append(GTK_MENU_SHELL(menubar), setlists_item);
+  gtk_menu_shell_append(GTK_MENU_SHELL(menubar), help_item);
+
+  g_signal_connect(mi_open, "activate", G_CALLBACK(on_menu_open), s);
+  g_signal_connect(mi_close, "activate", G_CALLBACK(on_menu_close), s);
+  g_signal_connect(mi_print, "activate", G_CALLBACK(on_menu_print), s);
+  g_signal_connect(mi_quit, "activate", G_CALLBACK(on_menu_quit), s);
+  g_signal_connect(mi_open_setlist, "activate", G_CALLBACK(on_menu_setlist), s);
+  g_signal_connect(mi_create_setlist, "activate", G_CALLBACK(on_menu_create_setlist), s);
+  g_signal_connect(mi_edit_setlist, "activate", G_CALLBACK(on_menu_edit_setlist), s);
+  g_signal_connect(mi_delete_setlist, "activate", G_CALLBACK(on_menu_delete_setlist), s);
+  g_signal_connect(mi_help, "activate", G_CALLBACK(on_menu_help), s);
+  g_signal_connect(mi_about, "activate", G_CALLBACK(on_menu_about), s);
+
+  return menubar;
+}
+
 int main(int argc, char** argv) {
   gtk_init(&argc, &argv);
 
-  // --version option
+  ensure_setlists_directory();
+
   if (argc == 2 && std::string(argv[1]) == "--version") {
     g_print("rdScore %s\n", RDSCORE_VERSION);
     return 0;
   }
 
-  if (argc < 2) {
-    g_printerr("Usage: rdScore fichier.pdf\n");
-    return 1;
-  }
-
   AppState s;
   update_zoom_percent(&s);
 
-  // Robust: absolute path before g_filename_to_uri
-  char* abs_path = g_canonicalize_filename(argv[1], nullptr);
-  s.input_pdf_abs = abs_path ? abs_path : "";
-  char* uri = g_filename_to_uri(abs_path, nullptr, nullptr);
-  g_free(abs_path);
-
-  if (!uri) {
-    g_printerr("Bad path.\n");
-    return 1;
-  }
-
-  GError* err = nullptr;
-  s.doc = poppler_document_new_from_file(uri, nullptr, &err);
-  g_free(uri);
-
-  if (!s.doc) {
-    g_printerr("Impossible d'ouvrir le PDF: %s\n", err ? err->message : "unknown error");
-    if (err) g_error_free(err);
-    return 1;
-  }
-
-  s.n_pages = poppler_document_get_n_pages(s.doc);
-  if (s.n_pages <= 0) {
-    g_printerr("PDF sans pages.\n");
-    g_object_unref(s.doc);
-    return 1;
-  }
-
-  normalize_left(&s);
-
   s.window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
   gtk_window_set_default_size(GTK_WINDOW(s.window), 1200, 800);
+  gtk_window_set_title(GTK_WINDOW(s.window), "rdScore");
+
+  GtkWidget* vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  gtk_container_add(GTK_CONTAINER(s.window), vbox);
+
+  GtkWidget* menubar = build_menu_bar(&s);
+  gtk_box_pack_start(GTK_BOX(vbox), menubar, FALSE, FALSE, 0);
 
   s.scrolled = gtk_scrolled_window_new(nullptr, nullptr);
   gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(s.scrolled), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-  gtk_container_add(GTK_CONTAINER(s.window), s.scrolled);
+  gtk_box_pack_start(GTK_BOX(vbox), s.scrolled, TRUE, TRUE, 0);
 
   s.drawing = gtk_drawing_area_new();
   gtk_container_add(GTK_CONTAINER(s.scrolled), s.drawing);
@@ -1039,14 +1881,23 @@ int main(int argc, char** argv) {
 
   gtk_widget_show_all(s.window);
 
+  if (argc >= 2) {
+    if (!load_document_from_path(&s, argv[1], true)) {
+      unload_document(&s);
+    }
+  }
+
   gtk_main();
 
-  // Clean overlay timer if still armed
   if (s.zoom_overlay_timer) {
     g_source_remove(s.zoom_overlay_timer);
     s.zoom_overlay_timer = 0;
   }
+  if (s.page_overlay_timer) {
+    g_source_remove(s.page_overlay_timer);
+    s.page_overlay_timer = 0;
+  }
 
-  g_object_unref(s.doc);
+  unload_document(&s);
   return 0;
 }
