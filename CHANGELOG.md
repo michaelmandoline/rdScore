@@ -1,5 +1,21 @@
 # Changelog
 
+rdScore 1.1.1 – 2026-03-08
+
+Improvements
+- Menu accessible from keyboard
+- Permanent display of page and zoom in menu bar
+- Setlist window usability improvements
+
+New features
+- Rename setlist
+- Add multiple PDF files to setlists (Create/Edit)
+
+Bug fixes
+- GTK warnings on exit fixed
+- Improved stability of print dialog
+---
+
 ## Version 1.1.0 - 2026-03
 
 ### Added

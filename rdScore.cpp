@@ -1,4 +1,4 @@
-// rdScore.cpp (v1.1.0 candidate - menu, open/print, basic setlist dialog, single-field extract)
+// rdScore.cpp (v1.1.1 candidate - menu, open/print, basic setlist dialog, single-field extract)
 // Build:
 //   g++ -O2 -std=c++17 rdScore.cpp -o rdScore $(pkg-config --cflags --libs gtk+-3.0 poppler-glib)
 
@@ -49,7 +49,7 @@ static std::string basename_only(const std::string& path) {
   return out;
 }
 
-static const char* RDSCORE_VERSION = "1.1.0";
+static const char* RDSCORE_VERSION = "1.1.1";
 
 struct AppState {
   PopplerDocument* doc = nullptr;
@@ -84,6 +84,11 @@ struct AppState {
   GtkWidget* window = nullptr;
   GtkWidget* scrolled = nullptr;
   GtkWidget* drawing = nullptr;
+  GtkWidget* menubar = nullptr;
+  GtkWidget* menu_file = nullptr;
+  GtkWidget* menu_setlists = nullptr;
+  GtkWidget* menu_help = nullptr;
+  GtkWidget* status_label = nullptr;
 
   // last computed content size (for size_request)
   int contentW = 1200;
@@ -99,6 +104,30 @@ static inline void update_zoom_percent(AppState* s) {
   s->zoom_percent = (int)std::lround(s->zoom * 100.0);
 }
 
+static void update_status_label(AppState* s) {
+  if (!s || !s->status_label || !GTK_IS_LABEL(s->status_label)) return;
+
+  std::string text;
+  if (!s->doc || s->n_pages <= 0) {
+    text = "No PDF | Zoom " + std::to_string(s->zoom_percent) + "%";
+  } else if (s->two_pages) {
+    const int left = clampi(s->current_left, 0, std::max(0, s->n_pages - 1));
+    const int right = (left + 1 < s->n_pages) ? (left + 1) : -1;
+    if (right >= 0)
+      text = "Pages " + std::to_string(left + 1) + "-" + std::to_string(right + 1) +
+             " / " + std::to_string(s->n_pages) + " | Zoom " + std::to_string(s->zoom_percent) + "%";
+    else
+      text = "Page " + std::to_string(left + 1) +
+             " / " + std::to_string(s->n_pages) + " | Zoom " + std::to_string(s->zoom_percent) + "%";
+  } else {
+    const int page = clampi(s->current_left, 0, std::max(0, s->n_pages - 1));
+    text = "Page " + std::to_string(page + 1) +
+           " / " + std::to_string(s->n_pages) + " | Zoom " + std::to_string(s->zoom_percent) + "%";
+  }
+
+  gtk_label_set_text(GTK_LABEL(s->status_label), text.c_str());
+}
+
 static void normalize_left(AppState* s) {
   s->current_left = clampi(s->current_left, 0, std::max(0, s->n_pages - 1));
   if (s->two_pages && (s->current_left % 2 == 1)) s->current_left--;
@@ -106,7 +135,7 @@ static void normalize_left(AppState* s) {
 }
 
 static void hide_cursor(GtkWidget* widget) {
-  (void)widget; // v1.1.0: keep pointer visible while menu is available
+  (void)widget; // keep pointer visible while menu is available
 }
 
 static void show_cursor(GtkWidget* widget) {
@@ -154,7 +183,18 @@ static void toggle_fullscreen(AppState* s) {
 }
 
 static void queue_redraw(AppState* s) {
-  if (s && s->drawing) gtk_widget_queue_draw(s->drawing);
+  if (s && s->drawing && GTK_IS_WIDGET(s->drawing))
+    gtk_widget_queue_draw(s->drawing);
+}
+
+static void on_main_window_destroy(GtkWidget*, gpointer user_data) {
+  AppState* s = (AppState*)user_data;
+  if (s) {
+    s->window = nullptr;
+    s->scrolled = nullptr;
+    s->drawing = nullptr;
+  }
+  gtk_main_quit();
 }
 
 // ===== Helper: ESC closes dialogs reliably
@@ -165,6 +205,23 @@ static gboolean dialog_esc_to_cancel(GtkWidget* widget, GdkEventKey* ev, gpointe
   }
   return FALSE;
 }
+
+
+static void open_setlist_row_activated(GtkTreeView*, GtkTreePath*, GtkTreeViewColumn*, gpointer user_data) {
+  GtkWidget* dlg = GTK_WIDGET(user_data);
+  if (dlg) gtk_dialog_response(GTK_DIALOG(dlg), GTK_RESPONSE_OK);
+}
+
+static gboolean open_setlist_key_press(GtkWidget*, GdkEventKey* ev, gpointer user_data) {
+  GtkWidget* dlg = GTK_WIDGET(user_data);
+  if (!dlg || !ev) return FALSE;
+  if (ev->keyval == GDK_KEY_Return || ev->keyval == GDK_KEY_KP_Enter) {
+    gtk_dialog_response(GTK_DIALOG(dlg), GTK_RESPONSE_OK);
+    return TRUE;
+  }
+  return FALSE;
+}
+
 
 // ===== Zoom overlay (B)
 static gboolean zoom_overlay_timeout_cb(gpointer user_data) {
@@ -329,6 +386,7 @@ static void goto_left_page(AppState* s, int left0) {
   s->current_left = clampi(left0, 0, std::max(0, s->n_pages - 1));
   normalize_left(s);
   compute_content_size(s);
+  update_status_label(s);
   trigger_page_overlay(s);
   queue_redraw(s);
 }
@@ -352,6 +410,7 @@ static void zoom_in(AppState* s)  {
   update_zoom_percent(s);
   trigger_zoom_overlay(s);
   compute_content_size(s);
+  update_status_label(s);
   trigger_page_overlay(s);
   queue_redraw(s);
 }
@@ -360,6 +419,7 @@ static void zoom_out(AppState* s) {
   update_zoom_percent(s);
   trigger_zoom_overlay(s);
   compute_content_size(s);
+  update_status_label(s);
   trigger_page_overlay(s);
   queue_redraw(s);
 }
@@ -368,6 +428,7 @@ static void zoom_reset(AppState* s){
   update_zoom_percent(s);
   trigger_zoom_overlay(s);
   compute_content_size(s);
+  update_status_label(s);
   trigger_page_overlay(s);
   queue_redraw(s);
 }
@@ -711,6 +772,7 @@ static bool open_setlist_dialog(AppState* s);
 static void close_current_document(AppState* s);
 static void create_setlist_dialog(AppState* s);
 static void edit_setlist_dialog(AppState* s);
+static void rename_setlist_dialog(AppState* s);
 static void delete_setlist_dialog(AppState* s);
 
 static void goto_dialog(AppState* s) {
@@ -751,11 +813,35 @@ static void goto_dialog(AppState* s) {
   gtk_widget_destroy(dialog);
 }
 
+static void open_top_menu(AppState* s, GtkWidget* item) {
+  if (!s || !s->menubar || !item) return;
+  gtk_widget_grab_focus(s->menubar);
+  gtk_menu_shell_select_item(GTK_MENU_SHELL(s->menubar), item);
+  gtk_menu_item_activate(GTK_MENU_ITEM(item));
+}
+
 static gboolean on_key(GtkWidget*, GdkEventKey* ev, gpointer user_data) {
   AppState* s = (AppState*)user_data;
   if (!s) return FALSE;
 
   const bool ctrl = (ev->state & GDK_CONTROL_MASK) != 0;
+  const bool alt  = (ev->state & GDK_MOD1_MASK) != 0;
+
+  if (alt && !ctrl) {
+    switch (ev->keyval) {
+      case GDK_KEY_f:
+      case GDK_KEY_F:
+        open_top_menu(s, s->menu_file); return TRUE;
+      case GDK_KEY_s:
+      case GDK_KEY_S:
+        open_top_menu(s, s->menu_setlists); return TRUE;
+      case GDK_KEY_h:
+      case GDK_KEY_H:
+        open_top_menu(s, s->menu_help); return TRUE;
+      default:
+        return FALSE;
+    }
+  }
 
   // Shortcuts with Ctrl
   if (ctrl) {
@@ -977,84 +1063,12 @@ static gboolean on_draw(GtkWidget* widget, cairo_t* cr, gpointer user_data) {
 
   // ===== Draw zoom overlay (B)
   if (s->zoom_overlay) {
-    std::string z = std::to_string(s->zoom_overlay_percent) + " %";
-
-    const double bw = 200.0, bh = 96.0;
-    // Center zoom overlay in the visible viewport (not the full content)
-    int vw = 0, vh = 0;
-    get_viewport_size(s, vw, vh);
-    double sx = 0.0, sy = 0.0;
-    if (s->scrolled) {
-      GtkAdjustment* hadj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(s->scrolled));
-      GtkAdjustment* vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(s->scrolled));
-      if (hadj) sx = gtk_adjustment_get_value(hadj);
-      if (vadj) sy = gtk_adjustment_get_value(vadj);
-    }
-    const double x = sx + (vw - bw) * 0.5;
-    const double y = sy + (vh - bh) * 0.5;
-
-    cairo_save(cr);
-
-    cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.60);
-    cairo_rectangle(cr, x, y, bw, bh);
-    cairo_fill(cr);
-
-    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.92);
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
-    cairo_set_font_size(cr, 36);
-
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, z.c_str(), &te);
-    const double tx = x + (bw - te.width) * 0.5 - te.x_bearing;
-    const double ty = y + (bh - te.height) * 0.5 - te.y_bearing;
-
-    cairo_move_to(cr, tx, ty);
-    cairo_show_text(cr, z.c_str());
-
-    cairo_restore(cr);
+    /* visual zoom overlay disabled in test v5h */
   }
 
 
   if (s->page_overlay) {
-    const std::string& t = s->page_overlay_text;
-
-    const double pad = 18.0;
-    cairo_save(cr);
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
-    cairo_set_font_size(cr, 22);
-
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, t.c_str(), &te);
-
-    const double bw = te.width + pad * 2.0;
-    const double bh = te.height + pad * 1.6;
-
-    // Place overlay inside the *visible viewport* (important when scrolled, e.g. non-fullscreen)
-    int vw = 0, vh = 0;
-    get_viewport_size(s, vw, vh);
-    double sx = 0.0, sy = 0.0;
-    if (s->scrolled) {
-      GtkAdjustment* hadj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(s->scrolled));
-      GtkAdjustment* vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(s->scrolled));
-      if (hadj) sx = gtk_adjustment_get_value(hadj);
-      if (vadj) sy = gtk_adjustment_get_value(vadj);
-    }
-
-    const double x = sx + (vw - bw) * 0.5;
-    const double y = sy + std::max(12.0, vh * 0.08);
-
-    cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.55);
-    cairo_rectangle(cr, x, y, bw, bh);
-    cairo_fill(cr);
-
-    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.92);
-    const double tx = x + pad - te.x_bearing;
-    const double ty = y + (bh - te.height) * 0.5 - te.y_bearing;
-
-    cairo_move_to(cr, tx, ty);
-    cairo_show_text(cr, t.c_str());
-
-    cairo_restore(cr);
+    /* visual page overlay disabled in test v5h */
   }
 
 
@@ -1095,7 +1109,9 @@ static void unload_document(AppState* s) {
   s->input_pdf_abs.clear();
   s->contentW = 1200;
   s->contentH = 800;
-  if (s->drawing) gtk_widget_set_size_request(s->drawing, s->contentW, s->contentH);
+  if (s->drawing && GTK_IS_WIDGET(s->drawing))
+    gtk_widget_set_size_request(s->drawing, s->contentW, s->contentH);
+  update_status_label(s);
   queue_redraw(s);
 }
 
@@ -1162,6 +1178,7 @@ static bool load_document_from_path(AppState* s, const std::string& path, bool s
   s->current_doc_from_setlist = from_setlist;
   normalize_left(s);
   compute_content_size(s);
+  update_status_label(s);
   trigger_page_overlay(s);
   queue_redraw(s);
   return true;
@@ -1341,6 +1358,63 @@ static bool choose_pdf_path(AppState* s, std::string& out_path) {
   return ok;
 }
 
+static bool choose_pdf_paths(AppState* s, std::vector<std::string>& out_paths) {
+  GtkWidget* dlg = gtk_file_chooser_dialog_new(
+      "Choose PDF(s)",
+      GTK_WINDOW(s->window),
+      GTK_FILE_CHOOSER_ACTION_OPEN,
+      "_Cancel", GTK_RESPONSE_CANCEL,
+      "_Open", GTK_RESPONSE_ACCEPT,
+      nullptr);
+  g_signal_connect(dlg, "key-press-event", G_CALLBACK(dialog_esc_to_cancel), nullptr);
+  gtk_file_chooser_set_select_multiple(GTK_FILE_CHOOSER(dlg), TRUE);
+
+  GtkFileFilter* f = gtk_file_filter_new();
+  gtk_file_filter_set_name(f, "PDF (*.pdf)");
+  gtk_file_filter_add_pattern(f, "*.pdf");
+  gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dlg), f);
+
+  if (!s->last_pdf_dir.empty()) {
+    gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(dlg), s->last_pdf_dir.c_str());
+  } else if (!s->input_pdf_abs.empty()) {
+    char* dir = g_path_get_dirname(s->input_pdf_abs.c_str());
+    if (dir) {
+      gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(dlg), dir);
+      g_free(dir);
+    }
+  }
+
+  bool ok = false;
+  dialog_begin(s, dlg);
+  int resp = gtk_dialog_run(GTK_DIALOG(dlg));
+  dialog_end(s);
+
+  if (resp == GTK_RESPONSE_ACCEPT) {
+    GSList* files = gtk_file_chooser_get_filenames(GTK_FILE_CHOOSER(dlg));
+    for (GSList* p = files; p; p = p->next) {
+      char* fn = (char*)p->data;
+      if (fn) {
+        std::string path = fn;
+        if (!path.empty() && path[0] == '/') out_paths.push_back(path);
+        g_free(fn);
+      }
+    }
+    g_slist_free(files);
+
+    if (!out_paths.empty()) {
+      char* dir = g_path_get_dirname(out_paths.front().c_str());
+      if (dir) {
+        s->last_pdf_dir = dir;
+        g_free(dir);
+      }
+      ok = true;
+    }
+  }
+
+  gtk_widget_destroy(dlg);
+  return ok;
+}
+
 static std::vector<std::string> collect_store_strings(GtkListStore* store) {
   std::vector<std::string> out;
   GtkTreeModel* model = GTK_TREE_MODEL(store);
@@ -1456,17 +1530,24 @@ static bool edit_setlist_file(AppState* s, const std::string& setlist_path, std:
     }
 
     if (resp == RESP_ADD) {
-      std::string pdf;
-      if (!choose_pdf_path(s, pdf)) continue;
+      std::vector<std::string> pdfs;
+      if (!choose_pdf_paths(s, pdfs)) continue;
 
       int idx = get_selected_row_index(GTK_TREE_VIEW(view));
       int count = gtk_tree_model_iter_n_children(GTK_TREE_MODEL(store), nullptr);
       if (idx < 0 || idx > count) idx = count;
-      GtkTreeIter it;
-      if (idx >= count) gtk_list_store_append(store, &it);
-      else gtk_list_store_insert(store, &it, idx);
-      gtk_list_store_set(store, &it, 0, pdf.c_str(), -1);
-      set_cursor_to_row(GTK_TREE_VIEW(view), idx);
+
+      int insert_at = idx;
+      for (const auto& pdf : pdfs) {
+        GtkTreeIter it;
+        int current_count = gtk_tree_model_iter_n_children(GTK_TREE_MODEL(store), nullptr);
+        if (insert_at >= current_count) gtk_list_store_append(store, &it);
+        else gtk_list_store_insert(store, &it, insert_at);
+        gtk_list_store_set(store, &it, 0, pdf.c_str(), -1);
+        ++insert_at;
+      }
+
+      set_cursor_to_row(GTK_TREE_VIEW(view), insert_at - 1);
       continue;
     }
 
@@ -1559,6 +1640,74 @@ static bool confirm_delete_setlist(AppState* s, const std::string& setlist_path)
   return resp == GTK_RESPONSE_OK;
 }
 
+
+static bool choose_rename_setlist_path(AppState* s, const std::string& old_path, std::string& out_path) {
+  GtkWidget* dlg = gtk_file_chooser_dialog_new(
+      "Rename setlist",
+      GTK_WINDOW(s->window),
+      GTK_FILE_CHOOSER_ACTION_SAVE,
+      "_Cancel", GTK_RESPONSE_CANCEL,
+      "_Rename", GTK_RESPONSE_ACCEPT,
+      nullptr);
+
+  std::string dir = get_setlists_directory();
+  if (!dir.empty()) gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(dlg), dir.c_str());
+  gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(dlg), TRUE);
+  gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dlg), basename_only(old_path).c_str());
+
+  g_signal_connect(dlg, "key-press-event", G_CALLBACK(dialog_esc_to_cancel), nullptr);
+
+  GtkFileFilter* f = gtk_file_filter_new();
+  gtk_file_filter_set_name(f, "Setlists (*.txt, *.lst, *.setlist)");
+  gtk_file_filter_add_pattern(f, "*.txt");
+  gtk_file_filter_add_pattern(f, "*.lst");
+  gtk_file_filter_add_pattern(f, "*.setlist");
+  gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dlg), f);
+
+  bool ok = false;
+  dialog_begin(s, dlg);
+  int resp = gtk_dialog_run(GTK_DIALOG(dlg));
+  dialog_end(s);
+
+  if (resp == GTK_RESPONSE_ACCEPT) {
+    char* fn = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
+    if (fn) {
+      out_path = fn;
+      g_free(fn);
+
+      std::string lower = out_path;
+      std::transform(lower.begin(), lower.end(), lower.begin(),
+                     [](unsigned char c){ return (char)std::tolower(c); });
+      bool has_ext = (lower.size() >= 4 && lower.substr(lower.size() - 4) == ".lst") ||
+                     (lower.size() >= 4 && lower.substr(lower.size() - 4) == ".txt") ||
+                     (lower.size() >= 8 && lower.substr(lower.size() - 8) == ".setlist");
+      if (!has_ext) out_path += ".lst";
+
+      ok = true;
+    }
+  }
+
+  gtk_widget_destroy(dlg);
+  return ok;
+}
+
+static void rename_setlist_dialog(AppState* s) {
+  std::string old_path;
+  if (!choose_setlist_file(s, "Rename setlist", old_path)) return;
+
+  std::string new_path;
+  if (!choose_rename_setlist_path(s, old_path, new_path)) return;
+
+  if (new_path == old_path) return;
+
+  if (::rename(old_path.c_str(), new_path.c_str()) == 0) {
+    if (s->active_setlist_path == old_path) s->active_setlist_path = new_path;
+    info_box(s, "Setlist renamed:\n" + basename_only(old_path) + "\n→ " + basename_only(new_path));
+  } else {
+    info_box(s, "Rename failed:\n" + old_path + "\n→ " + new_path);
+  }
+}
+
 static void create_setlist_dialog(AppState* s) {
   std::string path;
   if (!choose_new_setlist_path(s, path)) return;
@@ -1624,16 +1773,20 @@ static bool open_setlist_dialog_from_path(AppState* s, const std::string& setlis
   gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(view), TRUE);
   GtkTreeSelection* sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(view));
   gtk_tree_selection_set_mode(sel, GTK_SELECTION_BROWSE);
+  g_signal_connect(view, "row-activated", G_CALLBACK(open_setlist_row_activated), dlg);
+  g_signal_connect(view, "key-press-event", G_CALLBACK(open_setlist_key_press), dlg);
 
   GtkWidget* sw = gtk_scrolled_window_new(nullptr, nullptr);
   gtk_widget_set_size_request(sw, 700, 300);
   gtk_container_add(GTK_CONTAINER(sw), view);
   gtk_box_pack_start(GTK_BOX(box), sw, TRUE, TRUE, 0);
 
+  gtk_dialog_set_default_response(GTK_DIALOG(dlg), GTK_RESPONSE_OK);
   gtk_widget_show_all(dlg);
   GtkTreePath* p0 = gtk_tree_path_new_first();
   gtk_tree_view_set_cursor(GTK_TREE_VIEW(view), p0, nullptr, FALSE);
   gtk_tree_path_free(p0);
+  gtk_widget_grab_focus(view);
 
   dialog_begin(s, dlg);
   int resp = gtk_dialog_run(GTK_DIALOG(dlg));
@@ -1785,42 +1938,47 @@ static void on_menu_print(GtkWidget*, gpointer user_data) { print_document((AppS
 static void on_menu_setlist(GtkWidget*, gpointer user_data) { open_setlist_dialog((AppState*)user_data); }
 static void on_menu_create_setlist(GtkWidget*, gpointer user_data) { create_setlist_dialog((AppState*)user_data); }
 static void on_menu_edit_setlist(GtkWidget*, gpointer user_data) { edit_setlist_dialog((AppState*)user_data); }
+static void on_menu_rename_setlist(GtkWidget*, gpointer user_data) { rename_setlist_dialog((AppState*)user_data); }
 static void on_menu_delete_setlist(GtkWidget*, gpointer user_data) { delete_setlist_dialog((AppState*)user_data); }
 static void on_menu_help(GtkWidget*, gpointer user_data) { show_help((AppState*)user_data); }
 static void on_menu_about(GtkWidget*, gpointer user_data) { show_about_box((AppState*)user_data); }
 static void on_menu_quit(GtkWidget*, gpointer) { gtk_main_quit(); }
 
 static GtkWidget* build_menu_bar(AppState* s) {
+  GtkWidget* hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
   GtkWidget* menubar = gtk_menu_bar_new();
+  gtk_widget_set_can_focus(menubar, TRUE);
 
-  GtkWidget* file_item = gtk_menu_item_new_with_label("File");
+  GtkWidget* file_item = gtk_menu_item_new_with_mnemonic("_File");
   GtkWidget* file_menu = gtk_menu_new();
-  GtkWidget* mi_open = gtk_menu_item_new_with_label("Open");
-  GtkWidget* mi_close = gtk_menu_item_new_with_label("Close");
-  GtkWidget* mi_print = gtk_menu_item_new_with_label("Print");
-  GtkWidget* mi_quit = gtk_menu_item_new_with_label("Quit");
+  GtkWidget* mi_open = gtk_menu_item_new_with_mnemonic("_Open");
+  GtkWidget* mi_close = gtk_menu_item_new_with_mnemonic("_Close");
+  GtkWidget* mi_print = gtk_menu_item_new_with_mnemonic("_Print");
+  GtkWidget* mi_quit = gtk_menu_item_new_with_mnemonic("_Quit");
   gtk_menu_shell_append(GTK_MENU_SHELL(file_menu), mi_open);
   gtk_menu_shell_append(GTK_MENU_SHELL(file_menu), mi_close);
   gtk_menu_shell_append(GTK_MENU_SHELL(file_menu), mi_print);
   gtk_menu_shell_append(GTK_MENU_SHELL(file_menu), mi_quit);
   gtk_menu_item_set_submenu(GTK_MENU_ITEM(file_item), file_menu);
 
-  GtkWidget* setlists_item = gtk_menu_item_new_with_label("Setlists");
+  GtkWidget* setlists_item = gtk_menu_item_new_with_mnemonic("_Setlists");
   GtkWidget* setlists_menu = gtk_menu_new();
-  GtkWidget* mi_open_setlist = gtk_menu_item_new_with_label("Open setlist");
-  GtkWidget* mi_create_setlist = gtk_menu_item_new_with_label("Create setlist");
-  GtkWidget* mi_edit_setlist = gtk_menu_item_new_with_label("Edit setlist");
-  GtkWidget* mi_delete_setlist = gtk_menu_item_new_with_label("Delete setlist");
+  GtkWidget* mi_open_setlist = gtk_menu_item_new_with_mnemonic("_Open setlist");
+  GtkWidget* mi_create_setlist = gtk_menu_item_new_with_mnemonic("_Create setlist");
+  GtkWidget* mi_edit_setlist = gtk_menu_item_new_with_mnemonic("_Edit setlist");
+  GtkWidget* mi_rename_setlist = gtk_menu_item_new_with_mnemonic("_Rename setlist");
+  GtkWidget* mi_delete_setlist = gtk_menu_item_new_with_mnemonic("_Delete setlist");
   gtk_menu_shell_append(GTK_MENU_SHELL(setlists_menu), mi_open_setlist);
   gtk_menu_shell_append(GTK_MENU_SHELL(setlists_menu), mi_create_setlist);
   gtk_menu_shell_append(GTK_MENU_SHELL(setlists_menu), mi_edit_setlist);
+  gtk_menu_shell_append(GTK_MENU_SHELL(setlists_menu), mi_rename_setlist);
   gtk_menu_shell_append(GTK_MENU_SHELL(setlists_menu), mi_delete_setlist);
   gtk_menu_item_set_submenu(GTK_MENU_ITEM(setlists_item), setlists_menu);
 
-  GtkWidget* help_item = gtk_menu_item_new_with_label("Help");
+  GtkWidget* help_item = gtk_menu_item_new_with_mnemonic("_Help");
   GtkWidget* help_menu = gtk_menu_new();
-  GtkWidget* mi_help = gtk_menu_item_new_with_label("Help");
-  GtkWidget* mi_about = gtk_menu_item_new_with_label("About");
+  GtkWidget* mi_help = gtk_menu_item_new_with_mnemonic("_Help");
+  GtkWidget* mi_about = gtk_menu_item_new_with_mnemonic("_About");
   gtk_menu_shell_append(GTK_MENU_SHELL(help_menu), mi_help);
   gtk_menu_shell_append(GTK_MENU_SHELL(help_menu), mi_about);
   gtk_menu_item_set_submenu(GTK_MENU_ITEM(help_item), help_menu);
@@ -1829,6 +1987,25 @@ static GtkWidget* build_menu_bar(AppState* s) {
   gtk_menu_shell_append(GTK_MENU_SHELL(menubar), setlists_item);
   gtk_menu_shell_append(GTK_MENU_SHELL(menubar), help_item);
 
+  GtkWidget* spacer = gtk_label_new(nullptr);
+  gtk_widget_set_hexpand(spacer, TRUE);
+  GtkWidget* status = gtk_label_new("No PDF | Zoom 100%");
+  gtk_widget_set_halign(status, GTK_ALIGN_END);
+  gtk_widget_set_margin_end(status, 8);
+  gtk_widget_set_margin_start(status, 8);
+
+  gtk_box_pack_start(GTK_BOX(hbox), menubar, FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(hbox), spacer, TRUE, TRUE, 0);
+  gtk_box_pack_end(GTK_BOX(hbox), status, FALSE, FALSE, 0);
+
+  if (s) {
+    s->menubar = menubar;
+    s->menu_file = file_item;
+    s->menu_setlists = setlists_item;
+    s->menu_help = help_item;
+    s->status_label = status;
+  }
+
   g_signal_connect(mi_open, "activate", G_CALLBACK(on_menu_open), s);
   g_signal_connect(mi_close, "activate", G_CALLBACK(on_menu_close), s);
   g_signal_connect(mi_print, "activate", G_CALLBACK(on_menu_print), s);
@@ -1836,11 +2013,12 @@ static GtkWidget* build_menu_bar(AppState* s) {
   g_signal_connect(mi_open_setlist, "activate", G_CALLBACK(on_menu_setlist), s);
   g_signal_connect(mi_create_setlist, "activate", G_CALLBACK(on_menu_create_setlist), s);
   g_signal_connect(mi_edit_setlist, "activate", G_CALLBACK(on_menu_edit_setlist), s);
+  g_signal_connect(mi_rename_setlist, "activate", G_CALLBACK(on_menu_rename_setlist), s);
   g_signal_connect(mi_delete_setlist, "activate", G_CALLBACK(on_menu_delete_setlist), s);
   g_signal_connect(mi_help, "activate", G_CALLBACK(on_menu_help), s);
   g_signal_connect(mi_about, "activate", G_CALLBACK(on_menu_about), s);
 
-  return menubar;
+  return hbox;
 }
 
 int main(int argc, char** argv) {
@@ -1865,6 +2043,7 @@ int main(int argc, char** argv) {
 
   GtkWidget* menubar = build_menu_bar(&s);
   gtk_box_pack_start(GTK_BOX(vbox), menubar, FALSE, FALSE, 0);
+  update_status_label(&s);
 
   s.scrolled = gtk_scrolled_window_new(nullptr, nullptr);
   gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(s.scrolled), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
@@ -1873,7 +2052,7 @@ int main(int argc, char** argv) {
   s.drawing = gtk_drawing_area_new();
   gtk_container_add(GTK_CONTAINER(s.scrolled), s.drawing);
 
-  g_signal_connect(s.window, "destroy", G_CALLBACK(gtk_main_quit), nullptr);
+  g_signal_connect(s.window, "destroy", G_CALLBACK(on_main_window_destroy), &s);
   g_signal_connect(s.window, "key-press-event", G_CALLBACK(on_key), &s);
   g_signal_connect(s.window, "realize", G_CALLBACK(on_realize), &s);
   g_signal_connect(s.scrolled, "size-allocate", G_CALLBACK(on_size_allocate), &s);

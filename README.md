@@ -66,6 +66,10 @@ La documentation technique du projet se trouve dans le dossier :
 
 doc/
 
+## Statut Projet
+
+Version courante : 1.1.1
+
 ---
 
 # English
@@ -136,4 +140,4 @@ directory.
 
 ## Project Status
 
-Current development target: version 1.1.0
+Current version: 1.1.1
