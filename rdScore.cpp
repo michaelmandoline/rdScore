@@ -16,6 +16,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <cerrno>
+#include <cstring>
 
 static std::string get_setlists_directory() {
   const char* home = getenv("HOME");
@@ -49,7 +50,7 @@ static std::string basename_only(const std::string& path) {
   return out;
 }
 
-static const char* RDSCORE_VERSION = "1.1.1";
+static const char* RDSCORE_VERSION = "1.1.2";
 
 struct AppState {
   PopplerDocument* doc = nullptr;
@@ -78,8 +79,10 @@ struct AppState {
 
   // Setlist context / chooser memory
   std::string active_setlist_path;
+  int last_setlist_index = 0;
   bool current_doc_from_setlist = false;
   std::string last_pdf_dir;
+  bool return_to_manage_setlists = false;
 
   GtkWidget* window = nullptr;
   GtkWidget* scrolled = nullptr;
@@ -130,8 +133,10 @@ static void update_status_label(AppState* s) {
 
 static void normalize_left(AppState* s) {
   s->current_left = clampi(s->current_left, 0, std::max(0, s->n_pages - 1));
-  if (s->two_pages && (s->current_left % 2 == 1)) s->current_left--;
-  s->current_left = clampi(s->current_left, 0, std::max(0, s->n_pages - 1));
+  if (s->two_pages && s->n_pages >= 2) {
+    const int last_left = s->n_pages - 2;
+    if (s->current_left > last_left) s->current_left = last_left;
+  }
 }
 
 static void hide_cursor(GtkWidget* widget) {
@@ -392,15 +397,25 @@ static void goto_left_page(AppState* s, int left0) {
 }
 
 static void next_page(AppState* s) {
-  int step = s->two_pages ? 2 : 1;
-  int t = s->current_left + step;
+  if (s->two_pages && s->n_pages >= 2) {
+    const int last_left = s->n_pages - 2;
+    if (s->current_left >= last_left) {
+      goto_left_page(s, last_left);
+      return;
+    }
+    int t = s->current_left + 1;
+    if (t > last_left) t = last_left;
+    goto_left_page(s, t);
+    return;
+  }
+
+  int t = s->current_left + 1;
   if (t >= s->n_pages) t = s->n_pages - 1;
   goto_left_page(s, t);
 }
 
 static void prev_page(AppState* s) {
-  int step = s->two_pages ? 2 : 1;
-  int t = s->current_left - step;
+  int t = s->current_left - 1;
   if (t < 0) t = 0;
   goto_left_page(s, t);
 }
@@ -636,7 +651,7 @@ static void extract_pages(AppState* s) {
       "Extraction PDF",
       GTK_WINDOW(s->window),
       (GtkDialogFlags)(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT),
-      "_Cancel", GTK_RESPONSE_CANCEL,
+      "_Back", GTK_RESPONSE_CANCEL,
       "_OK", GTK_RESPONSE_OK,
       nullptr);
   g_signal_connect(dialog, "key-press-event", G_CALLBACK(dialog_esc_to_cancel), nullptr);
@@ -774,6 +789,8 @@ static void create_setlist_dialog(AppState* s);
 static void edit_setlist_dialog(AppState* s);
 static void rename_setlist_dialog(AppState* s);
 static void delete_setlist_dialog(AppState* s);
+static void manage_setlists_dialog(AppState* s);
+static bool open_setlist_dialog_from_path(AppState* s, const std::string& setlist_path);
 
 static void goto_dialog(AppState* s) {
   GtkWidget* dialog = gtk_dialog_new_with_buttons(
@@ -1173,6 +1190,11 @@ static bool load_document_from_path(AppState* s, const std::string& path, bool s
   s->doc = new_doc;
   s->n_pages = n_pages;
   s->input_pdf_abs = abs_path;
+  char* dir = g_path_get_dirname(abs_path);
+  if (dir) {
+    s->last_pdf_dir = dir;
+    g_free(dir);
+  }
   g_free(abs_path);
   s->current_left = 0;
   s->current_doc_from_setlist = from_setlist;
@@ -1197,6 +1219,17 @@ static bool choose_open_pdf(AppState* s) {
   gtk_file_filter_set_name(f, "PDF (*.pdf)");
   gtk_file_filter_add_pattern(f, "*.pdf");
   gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dlg), f);
+
+  if (!s->last_pdf_dir.empty()) {
+    gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(dlg), s->last_pdf_dir.c_str());
+  } else if (!s->input_pdf_abs.empty()) {
+    char* dir = g_path_get_dirname(s->input_pdf_abs.c_str());
+    if (dir) {
+      gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(dlg), dir);
+      g_free(dir);
+    }
+  }
+
   dialog_begin(s, dlg);
   int resp = gtk_dialog_run(GTK_DIALOG(dlg));
   dialog_end(s);
@@ -1732,6 +1765,156 @@ static void delete_setlist_dialog(AppState* s) {
 }
 
 
+
+static void manage_setlists_refresh_store(GtkListStore* store) {
+  gtk_list_store_clear(store);
+  std::string dir = get_setlists_directory();
+  GDir* gd = g_dir_open(dir.c_str(), 0, nullptr);
+  if (!gd) return;
+  const char* name = nullptr;
+  while ((name = g_dir_read_name(gd)) != nullptr) {
+    std::string n = name;
+    bool ok = false;
+    if (n.size() >= 4 && n.substr(n.size()-4) == ".lst") ok = true;
+    else if (n.size() >= 4 && n.substr(n.size()-4) == ".txt") ok = true;
+    else if (n.size() >= 8 && n.substr(n.size()-8) == ".setlist") ok = true;
+    if (!ok) continue;
+    GtkTreeIter it;
+    gtk_list_store_append(store, &it);
+    gtk_list_store_set(store, &it, 0, n.c_str(), -1);
+  }
+  g_dir_close(gd);
+}
+
+static bool manage_setlists_selected_path(GtkTreeView* view, std::string& out_path) {
+  GtkTreeSelection* sel = gtk_tree_view_get_selection(view);
+  GtkTreeModel* model = nullptr;
+  GtkTreeIter it;
+  if (!gtk_tree_selection_get_selected(sel, &model, &it)) return false;
+  gchar* val = nullptr;
+  gtk_tree_model_get(model, &it, 0, &val, -1);
+  if (!val) return false;
+  out_path = get_setlists_directory() + "/" + std::string(val);
+  g_free(val);
+  return true;
+}
+
+static void manage_setlists_dialog(AppState* s) {
+  if (!s) return;
+  s->return_to_manage_setlists = false;
+
+  enum {
+    RESP_OPEN = 1001,
+    RESP_CREATE = 1002,
+    RESP_EDIT = 1003,
+    RESP_RENAME = 1004,
+    RESP_DELETE = 1005
+  };
+
+  GtkWidget* dlg = gtk_dialog_new_with_buttons(
+      "Manage Setlists",
+      GTK_WINDOW(s->window),
+      (GtkDialogFlags)(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT),
+      "Open", RESP_OPEN,
+      "Create", RESP_CREATE,
+      "Edit", RESP_EDIT,
+      "Rename", RESP_RENAME,
+      "Delete", RESP_DELETE,
+      "_Close", GTK_RESPONSE_CLOSE,
+      nullptr);
+  g_signal_connect(dlg, "key-press-event", G_CALLBACK(dialog_esc_to_cancel), nullptr);
+
+  GtkWidget* content = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
+  GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+  gtk_container_set_border_width(GTK_CONTAINER(box), 10);
+  gtk_container_add(GTK_CONTAINER(content), box);
+
+  GtkListStore* store = gtk_list_store_new(1, G_TYPE_STRING);
+  GtkWidget* view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
+  GtkCellRenderer* r = gtk_cell_renderer_text_new();
+  GtkTreeViewColumn* c = gtk_tree_view_column_new_with_attributes("Setlists", r, "text", 0, nullptr);
+  gtk_tree_view_append_column(GTK_TREE_VIEW(view), c);
+  gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(view), TRUE);
+  GtkTreeSelection* sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(view));
+  gtk_tree_selection_set_mode(sel, GTK_SELECTION_BROWSE);
+
+  GtkWidget* sw = gtk_scrolled_window_new(nullptr, nullptr);
+  gtk_widget_set_size_request(sw, 700, 340);
+  gtk_container_add(GTK_CONTAINER(sw), view);
+  gtk_box_pack_start(GTK_BOX(box), sw, TRUE, TRUE, 0);
+
+  manage_setlists_refresh_store(store);
+  if (gtk_tree_model_iter_n_children(GTK_TREE_MODEL(store), nullptr) > 0)
+    set_cursor_to_row(GTK_TREE_VIEW(view), 0);
+
+  gtk_widget_show_all(dlg);
+  gtk_widget_grab_focus(view);
+
+  while (true) {
+    dialog_begin(s, dlg);
+    int resp = gtk_dialog_run(GTK_DIALOG(dlg));
+    dialog_end(s);
+
+    if (resp == GTK_RESPONSE_CLOSE || resp == GTK_RESPONSE_CANCEL || resp == GTK_RESPONSE_DELETE_EVENT) {
+      break;
+    }
+
+    if (resp == RESP_OPEN) {
+      std::string setlist_path;
+      if (!manage_setlists_selected_path(GTK_TREE_VIEW(view), setlist_path)) continue;
+      gtk_widget_destroy(dlg);
+      s->return_to_manage_setlists = true;
+      open_setlist_dialog_from_path(s, setlist_path);
+      g_object_unref(store);
+      return;
+    }
+
+    if (resp == RESP_CREATE) {
+      create_setlist_dialog(s);
+      manage_setlists_refresh_store(store);
+      if (gtk_tree_model_iter_n_children(GTK_TREE_MODEL(store), nullptr) > 0)
+        set_cursor_to_row(GTK_TREE_VIEW(view), 0);
+      gtk_widget_grab_focus(view);
+      continue;
+    }
+
+    std::string setlist_path;
+    if (!manage_setlists_selected_path(GTK_TREE_VIEW(view), setlist_path)) continue;
+
+    if (resp == RESP_EDIT) {
+      auto items = parse_setlist_file(setlist_path);
+      edit_setlist_file(s, setlist_path, items, false);
+    } else if (resp == RESP_RENAME) {
+      std::string new_path;
+      if (choose_rename_setlist_path(s, setlist_path, new_path) && new_path != setlist_path) {
+        if (::rename(setlist_path.c_str(), new_path.c_str()) == 0) {
+          if (s->active_setlist_path == setlist_path) s->active_setlist_path = new_path;
+          info_box(s, "Setlist renamed:\n" + basename_only(setlist_path) + "\n-> " + basename_only(new_path));
+        } else {
+          info_box(s, "Rename failed:\n" + setlist_path + "\n-> " + new_path);
+        }
+      }
+    } else if (resp == RESP_DELETE) {
+      if (confirm_delete_setlist(s, setlist_path)) {
+        if (std::remove(setlist_path.c_str()) == 0) {
+          info_box(s, "Setlist deleted:\n" + setlist_path);
+          if (s->active_setlist_path == setlist_path) s->active_setlist_path.clear();
+        } else {
+          info_box(s, "Delete failed:\n" + setlist_path);
+        }
+      }
+    }
+
+    manage_setlists_refresh_store(store);
+    int count = gtk_tree_model_iter_n_children(GTK_TREE_MODEL(store), nullptr);
+    if (count > 0) set_cursor_to_row(GTK_TREE_VIEW(view), 0);
+    gtk_widget_grab_focus(view);
+  }
+
+  gtk_widget_destroy(dlg);
+  g_object_unref(store);
+}
+
 static bool open_setlist_dialog_from_path(AppState* s, const std::string& setlist_path) {
   auto items = parse_setlist_file(setlist_path);
   if (items.empty()) {
@@ -1743,7 +1926,7 @@ static bool open_setlist_dialog_from_path(AppState* s, const std::string& setlis
       "Setlist",
       GTK_WINDOW(s->window),
       (GtkDialogFlags)(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT),
-      "_Cancel", GTK_RESPONSE_CANCEL,
+      "_Back", GTK_RESPONSE_CANCEL,
       "_Open", GTK_RESPONSE_OK,
       nullptr);
   g_signal_connect(dlg, "key-press-event", G_CALLBACK(dialog_esc_to_cancel), nullptr);
@@ -1777,14 +1960,18 @@ static bool open_setlist_dialog_from_path(AppState* s, const std::string& setlis
   g_signal_connect(view, "key-press-event", G_CALLBACK(open_setlist_key_press), dlg);
 
   GtkWidget* sw = gtk_scrolled_window_new(nullptr, nullptr);
-  gtk_widget_set_size_request(sw, 700, 300);
+  gtk_widget_set_size_request(sw, 1000, 400);
   gtk_container_add(GTK_CONTAINER(sw), view);
   gtk_box_pack_start(GTK_BOX(box), sw, TRUE, TRUE, 0);
 
   gtk_dialog_set_default_response(GTK_DIALOG(dlg), GTK_RESPONSE_OK);
   gtk_widget_show_all(dlg);
-  GtkTreePath* p0 = gtk_tree_path_new_first();
+
+  int start_idx = s->last_setlist_index;
+  if (start_idx < 0 || start_idx >= (int)items.size()) start_idx = 0;
+  GtkTreePath* p0 = gtk_tree_path_new_from_indices(start_idx, -1);
   gtk_tree_view_set_cursor(GTK_TREE_VIEW(view), p0, nullptr, FALSE);
+  gtk_tree_view_scroll_to_cell(GTK_TREE_VIEW(view), p0, nullptr, TRUE, 0.5f, 0.0f);
   gtk_tree_path_free(p0);
   gtk_widget_grab_focus(view);
 
@@ -1797,13 +1984,20 @@ static bool open_setlist_dialog_from_path(AppState* s, const std::string& setlis
     GtkTreeModel* model = nullptr;
     GtkTreeIter it;
     if (gtk_tree_selection_get_selected(sel, &model, &it)) {
+      GtkTreePath* path = gtk_tree_model_get_path(model, &it);
+      if (path) {
+        int* indices = gtk_tree_path_get_indices(path);
+        if (indices) s->last_setlist_index = indices[0];
+        gtk_tree_path_free(path);
+      }
+
       gchar* value = nullptr;
       gtk_tree_model_get(model, &it, 1, &value, -1);
       if (value) {
         std::string chosen = value;
         g_free(value);
         if (chosen.empty() || chosen[0] != '/') {
-          info_box(s, "Setlist error:\nOnly absolute paths are allowed.");
+          info_box(s, "Setlist error: Only absolute paths are allowed.");
           ok = false;
         } else {
           s->active_setlist_path = setlist_path;
@@ -1813,6 +2007,10 @@ static bool open_setlist_dialog_from_path(AppState* s, const std::string& setlis
     }
   }
   gtk_widget_destroy(dlg);
+  if (!ok && s->return_to_manage_setlists) {
+    s->return_to_manage_setlists = false;
+    manage_setlists_dialog(s);
+  }
   return ok;
 }
 
@@ -1935,11 +2133,7 @@ static void show_main_menu_dialog(AppState* s) {
 static void on_menu_open(GtkWidget*, gpointer user_data) { choose_open_pdf((AppState*)user_data); }
 static void on_menu_close(GtkWidget*, gpointer user_data) { close_current_document((AppState*)user_data); }
 static void on_menu_print(GtkWidget*, gpointer user_data) { print_document((AppState*)user_data); }
-static void on_menu_setlist(GtkWidget*, gpointer user_data) { open_setlist_dialog((AppState*)user_data); }
-static void on_menu_create_setlist(GtkWidget*, gpointer user_data) { create_setlist_dialog((AppState*)user_data); }
-static void on_menu_edit_setlist(GtkWidget*, gpointer user_data) { edit_setlist_dialog((AppState*)user_data); }
-static void on_menu_rename_setlist(GtkWidget*, gpointer user_data) { rename_setlist_dialog((AppState*)user_data); }
-static void on_menu_delete_setlist(GtkWidget*, gpointer user_data) { delete_setlist_dialog((AppState*)user_data); }
+static void on_menu_manage_setlists(GtkWidget*, gpointer user_data) { manage_setlists_dialog((AppState*)user_data); }
 static void on_menu_help(GtkWidget*, gpointer user_data) { show_help((AppState*)user_data); }
 static void on_menu_about(GtkWidget*, gpointer user_data) { show_about_box((AppState*)user_data); }
 static void on_menu_quit(GtkWidget*, gpointer) { gtk_main_quit(); }
@@ -1963,16 +2157,8 @@ static GtkWidget* build_menu_bar(AppState* s) {
 
   GtkWidget* setlists_item = gtk_menu_item_new_with_mnemonic("_Setlists");
   GtkWidget* setlists_menu = gtk_menu_new();
-  GtkWidget* mi_open_setlist = gtk_menu_item_new_with_mnemonic("_Open setlist");
-  GtkWidget* mi_create_setlist = gtk_menu_item_new_with_mnemonic("_Create setlist");
-  GtkWidget* mi_edit_setlist = gtk_menu_item_new_with_mnemonic("_Edit setlist");
-  GtkWidget* mi_rename_setlist = gtk_menu_item_new_with_mnemonic("_Rename setlist");
-  GtkWidget* mi_delete_setlist = gtk_menu_item_new_with_mnemonic("_Delete setlist");
-  gtk_menu_shell_append(GTK_MENU_SHELL(setlists_menu), mi_open_setlist);
-  gtk_menu_shell_append(GTK_MENU_SHELL(setlists_menu), mi_create_setlist);
-  gtk_menu_shell_append(GTK_MENU_SHELL(setlists_menu), mi_edit_setlist);
-  gtk_menu_shell_append(GTK_MENU_SHELL(setlists_menu), mi_rename_setlist);
-  gtk_menu_shell_append(GTK_MENU_SHELL(setlists_menu), mi_delete_setlist);
+  GtkWidget* mi_manage_setlists = gtk_menu_item_new_with_mnemonic("_Manage Setlists");
+  gtk_menu_shell_append(GTK_MENU_SHELL(setlists_menu), mi_manage_setlists);
   gtk_menu_item_set_submenu(GTK_MENU_ITEM(setlists_item), setlists_menu);
 
   GtkWidget* help_item = gtk_menu_item_new_with_mnemonic("_Help");
@@ -2010,11 +2196,7 @@ static GtkWidget* build_menu_bar(AppState* s) {
   g_signal_connect(mi_close, "activate", G_CALLBACK(on_menu_close), s);
   g_signal_connect(mi_print, "activate", G_CALLBACK(on_menu_print), s);
   g_signal_connect(mi_quit, "activate", G_CALLBACK(on_menu_quit), s);
-  g_signal_connect(mi_open_setlist, "activate", G_CALLBACK(on_menu_setlist), s);
-  g_signal_connect(mi_create_setlist, "activate", G_CALLBACK(on_menu_create_setlist), s);
-  g_signal_connect(mi_edit_setlist, "activate", G_CALLBACK(on_menu_edit_setlist), s);
-  g_signal_connect(mi_rename_setlist, "activate", G_CALLBACK(on_menu_rename_setlist), s);
-  g_signal_connect(mi_delete_setlist, "activate", G_CALLBACK(on_menu_delete_setlist), s);
+  g_signal_connect(mi_manage_setlists, "activate", G_CALLBACK(on_menu_manage_setlists), s);
   g_signal_connect(mi_help, "activate", G_CALLBACK(on_menu_help), s);
   g_signal_connect(mi_about, "activate", G_CALLBACK(on_menu_about), s);
 

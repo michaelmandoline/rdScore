@@ -5,6 +5,11 @@ rdScore is developed and tested on Linux.
 The program depends on GTK and Poppler for PDF rendering.
 Page extraction relies on qpdf.
 
+Requirements
+- GTK+ 3
+- Poppler (poppler-glib)
+- qpdf
+
 ---
 
 ## Tested on

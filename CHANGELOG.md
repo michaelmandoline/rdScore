@@ -1,5 +1,30 @@
 # Changelog
 
+rdScore 1.1.2
+--------------
+
+Stability and ergonomics improvements.
+
+Navigation
+- Page navigation now advances one page at a time in both 1-page and 2-page display modes.
+- In 2-page mode, navigation stops correctly at the last page pair (no longer displays the last page alone).
+
+Setlists
+- Added Manage Setlists dialog for centralized management.
+- Improved navigation flow between Manage Setlists, Setlist view and PDF view.
+- Remember selected setlist entry when returning from a score.
+
+File handling
+- File → Open now reopens the last directory used.
+- Improved error reporting when extraction fails.
+
+Extraction
+- Fixed incorrect error message when qpdf was present but extraction failed for another reason.
+
+General
+- Multiple usability and stability improvements.
+---
+
 rdScore 1.1.1 – 2026-03-08
 
 Improvements
