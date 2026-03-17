@@ -3,12 +3,12 @@
 rdScore is developed and tested on Linux.
 
 The program depends on GTK and Poppler for PDF rendering.
-Page extraction relies on qpdf.
+Page extraction relies on libqpdf.
 
 Requirements
-- GTK+ 3
-- Poppler (poppler-glib)
-- qpdf
+GTK+ 3
+poppler-glib
+libqpdf
 
 ---
 
@@ -23,17 +23,13 @@ Other GTK-based Linux environments should work as well.
 
 ---
 
-## Requirements
-
-Install the required packages:
-
-Ubuntu / Debian / Linux Mint:
-
 sudo apt install \
     build-essential \
     libgtk-3-dev \
     libpoppler-glib-dev \
-    qpdf
+    libqpdf-dev
+
+Note: PDF extraction is now handled internally using libqpdf.
 
 ---
 
@@ -41,8 +37,7 @@ sudo apt install \
 
 Compile the program with:
 
-g++ -O2 -std=c++17 rdScore.cpp -o rdScore \
-$(pkg-config --cflags --libs gtk+-3.0 poppler-glib)
+g++ -O2 -std=c++17 rdScore.cpp -o rdScore $(pkg-config --cflags --libs gtk+-3.0 poppler-glib libqpdf)
 
 ---
 

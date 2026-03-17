@@ -1,7 +1,20 @@
 # Changelog
 
+## rdScore 1.1.3
+
+### Internal improvement
+
+- Replaced external `qpdf` command-line dependency with integrated `libqpdf`
+- PDF extraction is now handled internally (no external tool required)
+- Improved portability for future multi-platform support
+
+### Stability
+
+- No change in user workflow
+- No regression in navigation, display modes, or setlists
+---
+
 rdScore 1.1.2
---------------
 
 Stability and ergonomics improvements.
 

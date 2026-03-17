@@ -62,13 +62,11 @@ La navigation n’est pas imposée : chaque entrée peut être ouverte directeme
 
 ## Documentation
 
-La documentation technique du projet se trouve dans le dossier :
-
-doc/
+La documentation technique sera ajoutée ultérieurement.
 
 ## Statut Projet
 
-Version courante : 1.1.1
+Version courante : 1.1.3
 
 ---
 
@@ -132,12 +130,8 @@ Navigation inside a setlist is not forced to follow the order; any entry can be 
 
 ## Documentation
 
-Technical documentation for the project can be found in the:
-
-doc/
-
-directory.
+Technical documentation will be added in a future version.
 
 ## Project Status
 
-Current version: 1.1.1
+Current version: 1.1.3
