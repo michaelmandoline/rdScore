@@ -1,5 +1,14 @@
 # Changelog
 
+rdScore 1.1.4
+
+Regression fix release.
+
+- Restored correct end-of-document behaviour in two-page mode
+- The last page can no longer appear alone after the final page pair
+- No other workflow changes
+---
+
 ## rdScore 1.1.3
 
 ### Internal improvement

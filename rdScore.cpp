@@ -1,9 +1,14 @@
-// rdScore.cpp (v1.1.1 candidate - menu, open/print, basic setlist dialog, single-field extract)
+// rdScore.cpp (v1.1.4 candidate - menu, open/print, basic setlist dialog, single-field extract)
 // Build:
 //   g++ -O2 -std=c++17 rdScore.cpp -o rdScore $(pkg-config --cflags --libs gtk+-3.0 poppler-glib)
 
 #include <gtk/gtk.h>
 #include <poppler.h>
+
+#define POINTERHOLDER_TRANSITION 0
+#include <qpdf/QPDF.hh>
+#include <qpdf/QPDFPageDocumentHelper.hh>
+#include <qpdf/QPDFWriter.hh>
 
 #include <algorithm>
 #include <string>
@@ -17,6 +22,7 @@
 #include <unistd.h>
 #include <cerrno>
 #include <cstring>
+#include <filesystem>
 
 static std::string get_setlists_directory() {
   const char* home = getenv("HOME");
@@ -50,7 +56,7 @@ static std::string basename_only(const std::string& path) {
   return out;
 }
 
-static const char* RDSCORE_VERSION = "1.1.2";
+static const char* RDSCORE_VERSION = "1.1.4";
 
 struct AppState {
   PopplerDocument* doc = nullptr;
@@ -130,7 +136,11 @@ static void update_status_label(AppState* s) {
 
   gtk_label_set_text(GTK_LABEL(s->status_label), text.c_str());
 }
-
+/*
+static void normalize_left(AppState* s) {
+  s->current_left = clampi(s->current_left, 0, std::max(0, s->n_pages - 1));
+}
+*/
 static void normalize_left(AppState* s) {
   s->current_left = clampi(s->current_left, 0, std::max(0, s->n_pages - 1));
   if (s->two_pages && s->n_pages >= 2) {
@@ -397,18 +407,6 @@ static void goto_left_page(AppState* s, int left0) {
 }
 
 static void next_page(AppState* s) {
-  if (s->two_pages && s->n_pages >= 2) {
-    const int last_left = s->n_pages - 2;
-    if (s->current_left >= last_left) {
-      goto_left_page(s, last_left);
-      return;
-    }
-    int t = s->current_left + 1;
-    if (t > last_left) t = last_left;
-    goto_left_page(s, t);
-    return;
-  }
-
   int t = s->current_left + 1;
   if (t >= s->n_pages) t = s->n_pages - 1;
   goto_left_page(s, t);
@@ -627,21 +625,55 @@ static bool run_qpdf_extract(AppState* s, const std::string& in_abs, int page_fr
     return false;
   }
 
-  std::string range = std::to_string(page_from_1) + "-" + std::to_string(page_to_1);
+  try {
+    namespace fs = std::filesystem;
 
-  // qpdf "in.pdf" --pages "in.pdf" 24-30 -- "out.pdf"
-  std::string cmd =
-      "qpdf \"" + in_abs + "\" --pages \"" + in_abs + "\" " + range + " -- \"" + out_abs + "\"";
+    fs::path source_path = fs::absolute(in_abs);
+    fs::path output_path = fs::absolute(out_abs);
 
-  int rc = system(cmd.c_str());
-  if (rc != 0) {
-    info_box(s, "Extraction échouée.\n"
-                "Vérifie que qpdf est installé : sudo apt install qpdf");
+    fs::path source_canon = fs::weakly_canonical(source_path);
+    fs::path output_canon;
+    if (fs::exists(output_path)) {
+      output_canon = fs::weakly_canonical(output_path);
+    } else {
+      output_canon = output_path.lexically_normal();
+    }
+
+    if (source_canon == output_canon) {
+      info_box(s, "Refus: impossible d'écraser le fichier source.");
+      return false;
+    }
+
+    QPDF pdf;
+    pdf.processFile(source_path.string().c_str());
+
+    QPDFPageDocumentHelper src_dh(pdf);
+    auto all_pages = src_dh.getAllPages();
+    int n_pages = (int)all_pages.size();
+
+    if (page_from_1 < 1 || page_to_1 < 1 || page_to_1 < page_from_1 ||
+        page_from_1 > n_pages || page_to_1 > n_pages) {
+      info_box(s, "Extraction échouée.\nPages hors limites.");
+      return false;
+    }
+
+    QPDF out_pdf;
+    out_pdf.emptyPDF();
+
+    QPDFPageDocumentHelper out_dh(out_pdf);
+    for (int i = page_from_1 - 1; i <= page_to_1 - 1; ++i) {
+      out_dh.addPage(all_pages[i], false);
+    }
+
+    QPDFWriter writer(out_pdf, output_path.string().c_str());
+    writer.write();
+
+    info_box(s, "PDF extrait enregistré:\n" + output_path.string());
+    return true;
+  } catch (const std::exception& e) {
+    info_box(s, std::string("Extraction échouée.\n") + e.what());
     return false;
   }
-
-  info_box(s, "PDF extrait enregistré:\n" + out_abs);
-  return true;
 }
 
 static void extract_pages(AppState* s) {
